@@ -1,0 +1,230 @@
+---
+title: "01-BFALgtseq_test1-exploration"
+output: html_notebook
+---
+
+13 December 2022
+
+Checking on the first GTseq run with the BFAL loci... 
+which ones to keep; which ones to toss; how common is the NNNN problem?
+
+
+```{r load-packages}
+library(tidyverse)
+```
+
+
+```{r load-data}
+data <- read_csv("../data/gtseq_test1_observed_unfiltered_haplotype.csv") %>%
+  select(-X1)
+```
+
+```{r}
+data %>%
+  filter(depth > 1)
+```
+Many (most!) entries have only a single read!
+
+
+A few general assessments:
+1) total depth
+
+```{r}
+data %>%
+  summarise(total_depth = sum(depth))
+```
+
+
+2) depth across loci
+
+```{r read-depth-across-loci}
+data %>%
+  group_by(locus) %>%
+  summarise(total_depth = sum(depth)) %>%
+  arrange(desc(total_depth)) %>%
+  ggplot(aes(x = reorder(locus, total_depth), y = total_depth)) +
+  geom_point()
+
+```
+
+```{r read-depth-across-high-performers}
+data %>%
+  group_by(locus) %>%
+  summarise(total_depth = sum(depth)) %>%
+  arrange(desc(total_depth)) %>%
+  filter(total_depth > 1000) %>%
+  ggplot(aes(x = reorder(locus, total_depth), y = total_depth)) +
+  geom_point() +
+  theme(
+    axis.text.x = element_text(angle = 90)
+  )
+
+```
+I'll remove the two overamplifying loci:
+
+scaffold_364_434127
+scaffold_925_195725
+
+
+What about reads across indivs
+
+```{r}
+data %>%
+  group_by(indiv.ID) %>%
+  summarise(total_depth = sum(depth)) %>%
+  arrange(desc(total_depth))
+
+
+```
+This confirms my inkling that s402, s434, and s406 had many more reads than any other individual.
+
+
+Make a heatmap of reads/locus/indiv
+```{r}
+data %>%
+  ggplot(aes(x = reorder(locus, depth), y = reorder(indiv.ID, depth), fill = log10(depth))) +
+  geom_tile()
+
+```
+What if I remove the top loci?
+
+```{r}
+data %>%
+  filter(!locus %in% c("scaffold_364_434127","scaffold_925_195725") &
+           !indiv.ID %in% c("s406", "s434", "s402")) %>%
+  ggplot(aes(x = reorder(locus, depth), y = reorder(indiv.ID, depth), fill = log10(depth))) +
+  geom_tile() 
+```
+
+Loci...
+
+How many actual haplotypes with N base-calls?
+
+```{r}
+reads_w_Ns <- data %>%
+  filter(!locus %in% c("scaffold_364_434127","scaffold_925_195725") &
+   !indiv.ID %in% c("s406", "s434", "s402"),
+    str_detect(haplo, "N"),
+   depth > 10)
+
+# unique haplotypes with Ns by locus
+reads_w_Ns %>%
+  select(locus, haplo) %>%
+  unique() %>%
+  group_by(locus) %>%
+  tally() %>%
+  arrange(desc(n))
+
+```
+Ok, seems worthwhile to remove the N reads from the fastq files to avoid this issue - but what if that makes the genotypes inaccurate (i.e., homozygote rather than heterozygote?)
+
+Which loci have only haplotypes with Ns?
+```{r}
+N_haplos <- data %>%
+  mutate(Ns = ifelse(str_detect(haplo, "N"), 1, 0)) %>%
+   filter(!locus %in% c("scaffold_364_434127","scaffold_925_195725") &
+   !indiv.ID %in% c("s406", "s434", "s402"),
+   depth > 2) %>%
+  select(locus, haplo, Ns) %>%
+  unique() %>%
+  group_by(locus) %>%
+  mutate(n_haplo = sum(Ns)) %>%
+  select(locus, n_haplo) %>%
+  unique() # this is the number of haplotypes with Ns by locus
+
+  
+```
+
+But to get the ratio, I need additional data.
+```{r}
+# total number of haplotypes per locus
+haplo_per_loc <- data %>%
+  mutate(Ns = ifelse(str_detect(haplo, "N"), 1, 0)) %>%
+   filter(!locus %in% c("scaffold_364_434127","scaffold_925_195725") &
+   !indiv.ID %in% c("s406", "s434", "s402"),
+   depth > 2) %>%
+  select(locus, haplo) %>%
+  unique() %>%
+  group_by(locus) %>%
+  tally()
+  
+```
+
+Combine those two things:
+
+```{r}
+N_haplos %>%
+  left_join(., haplo_per_loc) %>%
+  mutate(N_ratio = n_haplo/n) %>%
+  filter(N_ratio < 0.5)
+```
+
+37 loci in which all haplotypes have at least 1 N
+182 loci in which no haplotypes have an N
+225 loci in which < 50% of haplotypes have an N
+
+
+I don't love it, but I'm going to move forward and modify the primer concentrations for the next test run.
+
+
+
+Modify primer concentrations for round 2.
+```{r}
+primers_test2 <- data %>%
+  group_by(locus) %>%
+  summarise(total_depth = sum(depth)) %>%
+  arrange(desc(total_depth)) %>%
+  mutate(action = ifelse(total_depth > 200000, 0, 1)) %>%
+  mutate(action = ifelse(total_depth > 100 & total_depth < 1000, 1, action)) %>%
+  mutate(action = ifelse(total_depth < 100 & total_depth > 10, 1.5, action)) %>%
+  mutate(action = ifelse(total_depth > 1000 & total_depth < 200000, 0.5, action)) %>%
+  mutate(action = ifelse(total_depth < 10, 1.75, action)) %>%
+  # add in the original primer concentration
+  mutate(primer_conc = 0.25, new_conc = action*primer_conc, stock_conc = 100, pool_vol = 1000, cherrypick_vol = (new_conc*pool_vol)/stock_conc) %>%
+  # now split the pool into 2 based on read depth
+  mutate(primer_pool = ifelse(total_depth > 200, "Pool1", "Pool2")) %>%
+  group_by(primer_pool) %>%
+  add_tally() #%>%
+  #write_csv("../outputs/BFALgtseq_test2_primer_pool.csv")
+
+
+```
+
+
+
+One more thing needed for the cherrypick file: in which well is each primer located?
+
+```{r}
+# read in primer plate map
+platemap <- readxl::read_xlsx("../IDTplateSpecs_BFALgtseq_20221012.xlsx")
+```
+
+
+```{r}
+# select the relevant variables and make the sequence name match the data
+platemap1 <- platemap %>%
+  select(`Plate Name`, `Well Position`, `Sequence Name`) %>%
+  rename(locus = `Sequence Name`) 
+
+
+tmp <- gsub("BFAL_", "", platemap1$locus)
+tmp1 <- gsub("_R", "", tmp)
+tmp2 <- gsub("_F", "", tmp1)
+  
+platemap1$locus <- tmp2
+
+platemap1
+```
+
+
+```{r}
+# merge those two things:
+platemap1 %>%
+  left_join(., primers_test2) %>%
+  write_csv("../outputs/BFALgtseq_test2_primer_pool.csv")
+```
+
+
+
+
+

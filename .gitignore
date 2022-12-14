@@ -1,0 +1,11 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.sam_files/
+.data/
+.outputs/
+.BFALgtseq_test1PE_idx/
+.BFALgtseq_test1_idx/
+.rds_files/
+.microhaplot/
