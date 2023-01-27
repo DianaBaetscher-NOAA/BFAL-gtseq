@@ -1,0 +1,321 @@
+---
+title: "BFALgtseq-test2"
+output: html_notebook
+---
+
+11 January 2023
+
+This is the second test of the primers for the BFAL.
+
+Reminding myself: I used two separate primer pools, each with 48/96 samples.
+
+
+
+## Taking a look at output from GTscore
+
+
+```{r}
+library(tidyverse)
+```
+
+
+The plot we want is the R1 reads where the FWD primer was found vs. the flashed read where the FWD primer was found.
+
+
+```{r}
+# read in the GTscore output
+
+flashed <- read_tsv("../data/test2/flashed_locusSummary.txt") %>%
+  select(Locus, `Primer Reads`) %>%
+  rename(flashed_reads = `Primer Reads`)
+
+R1 <- read_tsv("../data/test2/R1_unzipped_locusSummary.txt") %>%
+  select(Locus, `Primer Reads`) %>%
+  rename(R1_reads = `Primer Reads`)
+```
+
+Look at those two df combined based on locus
+```{r}
+combo_df <- R1 %>%
+  left_join(., flashed, by = "Locus")
+
+combo_df %>%
+  summarise(sum(R1_reads))
+
+combo_df %>%
+  summarise(sum(flashed_reads))
+```
+
+
+```{r}
+combo_df %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads)) +
+  geom_point() +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+
+
+```
+
+So the loci that would be concerning are those with high numbers for the unmerged (R1) reads and disproportionately low numbers for the flashed reads in comparison.
+
+```{r}
+# create a proportion difference
+combo_df %>%
+  mutate(prop = flashed_reads/R1_reads) %>%
+  ggplot(aes(x = prop)) +
+  geom_histogram() +
+  labs(x = "proportion of R1 that also merged",
+       title = "BFAL proportion of on-target reads") +
+  theme_minimal()
+
+
+```
+
+
+More generally, what's the distribution of reads across loci?
+
+```{r}
+combo_df %>%
+  pivot_longer(cols = 2:3, names_to = "read_type", values_to = "reads") %>%
+  group_by(read_type) %>%
+  summarise(sum(reads)) 
+
+```
+
+```{r}
+1329026/2798712
+```
+~50% total on-target makes sense given the dimer.
+
+```{r}
+combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.75 & R1_reads >5000, "drop", "ok")) %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads, color = status)) +
+  geom_point() +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+```
+Zoom in on the origin to see what's going on.
+```{r}
+combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.8 & R1_reads >3900 | flashed_reads > 200000, "drop", "ok")) %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads, color = status)) +
+  geom_point() +
+  geom_abline(linetype = "dotted") +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+
+ggsave("pdf_outputs/test2_merged_vs_R1.pdf")
+```
+Maybe that's too stringent?
+
+
+
+```{r}
+combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  mutate(status = ifelse(prop < 0.8 & R1_reads >3900, "drop", "ok")) %>%
+  filter(flashed_reads < 10000 & R1_reads < 10000) %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads, color = status)) +
+  geom_point() +
+  labs(title = "BFAL flashed vs. unmerged reads, loci <10k reads") +
+  theme_minimal()
+
+ggsave("pdf_outputs/test2_merged_v_R1_under10k.pdf")
+```
+
+Now zoom in on loci with > 10k reads
+
+```{r}
+combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.75 & R1_reads >3900, "drop", "ok")) %>%
+  filter(flashed_reads > 10000 & R1_reads > 10000) %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads, color = status)) +
+  geom_point() +
+  labs(title = "BFAL flashed vs. unmerged reads, loci >10k reads") +
+  theme_minimal()
+```
+
+
+
+The final thing I'm curious about is whether the off-target loci that were retained from the first iteration just received too few reads the first time around to adequately assess them?
+
+Which loci am I planning on removing based on gtseq test 2?
+```{r}
+test2_droppers <- combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.9 & R1_reads >3900 | flashed_reads > 200000, "drop", "ok")) %>%
+  filter(status == "drop")
+
+```
+
+
+```{r}
+# how many remain?
+keepers <- combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.9 & R1_reads >3900 | flashed_reads > 200000, "drop", "ok")) %>%
+  filter(status == "ok")
+
+keepers
+```
+That leaves a total of 284 remaining.
+
+
+
+Quick look at the 42 I'm thinking of dropping from round 1.
+
+```{r}
+# read in the GTscore output
+
+test1_flashed <- read_tsv("../data/flashed_GTscore_locusSummary.txt") %>%
+  select(Locus, `Primer Reads`) %>%
+  rename(flashed_reads = `Primer Reads`)
+
+test1_R1 <- read_tsv("../data/R1_GTscore_locusSummary.txt") %>%
+  select(Locus, `Primer Reads`) %>%
+  rename(R1_reads = `Primer Reads`)
+```
+
+```{r}
+test1_df <- test1_R1 %>%
+  left_join(., test1_flashed, by = "Locus")
+
+t1_df <- test1_df %>%
+  mutate(prop = flashed_reads/R1_reads) %>%
+  mutate(prop = ifelse(prop == "NaN", 0, prop))
+
+test2_droppers %>%
+  left_join(., t1_df, by = "Locus") %>%
+  filter(prop.y > 0.5) # look at whether there were some that looked decent in round 1 that we kept in
+
+```
+
+Take a look at just a couple of them:
+
+```{r}
+combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.8 & R1_reads >3900 | flashed_reads > 200000, "drop", "ok")) %>%
+  mutate(status = ifelse(Locus == "BFAL_scaffold_592_558793", "question", status)) %>% # so that one is just the way overamper
+  ggplot(aes(x = flashed_reads, y = R1_reads, color = status)) +
+  geom_point() +
+  geom_abline(linetype = "dotted") +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+
+
+```
+
+
+## Which loci to drop, which to change the concentration?
+
+```{r}
+combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.8 & R1_reads >3900 | flashed_reads > 200000, "drop", "ok")) %>%
+  filter(status != "drop") %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads, color = status)) +
+  geom_point() +
+  scale_color_manual(values = "turquoise") +
+  geom_abline(linetype = "dotted") +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+
+```
+Make a list of the keepers and then change the primer concentration
+```{r}
+combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.8 & R1_reads >3900 | flashed_reads > 200000, "drop", "ok")) %>%
+  filter(status != "drop") %>%
+  arrange(desc(flashed_reads)) %>%
+  ggplot(aes(x = flashed_reads)) +
+  geom_histogram()
+
+```
+```{r}
+test2_new_primer_multipliers <- keepers %>%
+  mutate(multiplier = ifelse(flashed_reads >50000, 0.5, 1)) %>%
+    mutate(multiplier = ifelse(flashed_reads >100000, 0.25, multiplier)) %>%
+      mutate(multiplier = ifelse(flashed_reads <1000, 2, multiplier))
+
+
+# change format to match platemaps
+test2_new_primer_multipliers$Locus <- gsub("BFAL_", "", test2_new_primer_multipliers$Locus)  
+```
+
+Now add on the working stock primer plate info to that
+
+```{r}
+# read in primer plate map
+platemap <- readxl::read_xlsx("../IDTplateSpecs_BFALgtseq_20221012.xlsx")
+```
+
+
+```{r}
+# select the relevant variables and make the sequence name match the data
+platemap1 <- platemap %>%
+  select(`Plate Name`, `Well Position`, `Sequence Name`) %>%
+  rename(locus = `Sequence Name`) 
+
+
+tmp <- gsub("BFAL_", "", platemap1$locus)
+tmp1 <- gsub("_R", "", tmp)
+tmp2 <- gsub("_F", "", tmp1)
+  
+platemap1$locus <- tmp2
+
+platemap2 <- platemap1 %>% # since the FWD and REV primers are combined in plates, I only need one plate/well entry per primer set
+  filter(str_detect(`Plate Name`, "R"))
+
+```
+
+Assume we're making 1000 ul of new primer pool
+```{r}
+tmp1 <- platemap2 %>%
+  left_join(., test2_new_primer_multipliers, by = c("locus" = "Locus")) %>%
+  mutate(previous_uM = 0.5) %>% # this would correspond to 2.5 ul per primer pair
+  mutate(new_uM = previous_uM*multiplier) %>%
+  mutate(cherrypick_ul = (new_uM*1000)/200) %>% # working conc is 200 uM and volume of primer pool is 1000 
+  mutate(cherrypick_ul = ifelse(is.na(cherrypick_ul), 0, cherrypick_ul)) # make zeros explicit
+
+tmp1 %>%
+  select(`Plate Name`, `Well Position`, locus, cherrypick_ul) %>%
+  filter(cherrypick_ul >0) %>%
+  summarise(sum(cherrypick_ul))
+
+```
+That's a little off... but the math should be right.
+
+```{r}
+tmp1 %>%
+   select(`Plate Name`, `Well Position`, locus, cherrypick_ul) %>%
+    arrange(`Plate Name`) %>%
+  write_csv("csv_outputs/gtseq_test3_primer_cherrypick.csv")
+  
+```
+
+
+

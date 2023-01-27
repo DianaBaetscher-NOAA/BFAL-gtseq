@@ -1,0 +1,344 @@
+---
+title: "03-BFALgtseq-test3"
+output: html_notebook
+---
+
+23 January 2023
+
+This is the third test of the primers for the BFAL.
+
+Reminding myself: I used one primer pool, with different concentrations to even out coverage across primers.
+
+
+
+## Taking a look at output from GTscore
+
+
+```{r}
+library(tidyverse)
+```
+
+
+The plot we want is the R1 reads where the FWD primer was found vs. the flashed read where the FWD primer was found.
+
+
+```{r}
+# read in the GTscore output
+
+flashed <- read_tsv("../data/test3/merged_GTscore_locusSummary.txt") %>%
+  select(Locus, `Primer Reads`) %>%
+  rename(flashed_reads = `Primer Reads`)
+
+R1 <- read_tsv("../data/test3/R1_GTscore_locusSummary.txt") %>%
+  select(Locus, `Primer Reads`) %>%
+  rename(R1_reads = `Primer Reads`)
+```
+
+
+
+Look at those two df combined based on locus
+```{r}
+combo_df <- R1 %>%
+  left_join(., flashed, by = "Locus")
+
+combo_df %>%
+  summarise(sum(R1_reads))
+
+combo_df %>%
+  summarise(sum(flashed_reads))
+```
+```{r}
+# how many had 0 reads
+combo_df %>%
+  filter(R1_reads == 0)
+```
+57 zeros (we would have expected 60).
+
+
+
+```{r}
+combo_df %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads)) +
+  geom_point() +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+
+```
+
+
+
+```{r}
+# create a proportion difference
+combo_df %>%
+  mutate(prop = flashed_reads/R1_reads) %>%
+  ggplot(aes(x = prop)) +
+  geom_histogram() +
+  labs(x = "proportion of R1 that also merged",
+       title = "BFAL proportion of on-target reads") +
+  theme_minimal()
+
+
+```
+
+
+```{r}
+combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.75 & R1_reads >5000, "drop", "ok")) %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads, color = status)) +
+  geom_point() +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+
+
+```
+
+So there are maybe just two obvious loci to drop?
+
+```{r}
+overampers <- combo_df %>%
+  filter(R1_reads > 1000000)
+
+overampers
+```
+
+
+
+Look at the plot without those two:
+```{r}
+combo_df %>%
+  anti_join(., overampers) %>%
+   filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.75 & R1_reads >5000, "drop", "ok")) %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads, color = status)) +
+  geom_point() +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+  
+```
+Seems like I could drop more, but they're not particularly prone to over-amplifying.
+
+
+One key question: how did the primer concentration tweaking fare?
+
+
+```{r}
+combo_df %>%
+  anti_join(., overampers) %>%
+   filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.75, "drop", "ok"))
+
+
+```
+
+
+```{r}
+loc.list <- combo_df %>%
+  anti_join(., overampers) %>%
+  filter(!R1_reads == 0) %>%
+  arrange(R1_reads)
+
+```
+
+
+284 loci in the primer pool this time (and 285 with reads... hopefully one of the loci with 2 or 3 reads).
+
+
+```{r}
+test3_primer_conc <- read_csv("csv_outputs/gtseq_test3_primer_cherrypick.csv")
+
+tmp <- test3_primer_conc %>%
+  filter(cherrypick_ul == 0)
+
+```
+
+```{r}
+loc.list$Locus <- gsub("BFAL_", "", loc.list$Locus)
+
+loc.list
+```
+
+```{r}
+prior_conc_df <- loc.list %>%
+  left_join(., test3_primer_conc, by = c("Locus" = "locus")) %>%
+  filter(cherrypick_ul != 0)
+
+```
+
+```{r}
+prior_conc_df %>%
+  arrange(desc(cherrypick_ul)) %>%
+  ggplot() +
+  geom_point(aes(x = reorder(Locus, R1_reads), y = R1_reads))
+
+```
+
+
+
+Average number of reads, excluding overampers:
+```{r}
+loc.list %>%
+  summarise(mean(flashed_reads))
+
+loc.list %>%
+  summarise(median(flashed_reads))
+
+```
+
+
+```{r}
+combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the loci that I removed based on the first two iterations.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.70 & R1_reads > 3000 | R1_reads > 100000, "drop", "ok")) %>%
+  #filter(status != "drop") %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads, color = status)) +
+  geom_point() +
+  scale_color_manual(values = c("salmon", "turquoise")) +
+  geom_abline(linetype = "dotted") +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+
+```
+
+```{r}
+droppers <- combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the loci that I removed based on the first two iterations.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+ mutate(status = ifelse(prop < 0.7 & R1_reads > 2000 | R1_reads > 100000, "drop", "ok")) %>%   
+  filter(status == "drop")
+
+droppers %>%
+  ggplot(aes(x = prop)) +
+  geom_histogram()
+
+```
+
+This would be dropping 21 additional loci - mostly because of high off-target issues.
+
+
+And the plot without droppers?
+```{r}
+combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the loci that I removed based on the first two iterations.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.7 & R1_reads > 2000 | R1_reads > 100000, "drop", "ok")) %>%
+  anti_join(., droppers) %>%
+  #filter(status != "drop") %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads, color = status)) +
+  geom_point() +
+  scale_color_manual(values = c("turquoise")) +
+  geom_abline(linetype = "dotted") +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+
+
+```
+
+
+Primer concentrations for those keepers?
+
+Here I want to both take into account the # of flashed reads and the cherrypick volume - because we don't want to bump down primer sets that needed a boost previously.
+```{r}
+loc.list %>%
+  anti_join(., droppers) %>%
+  filter(!Locus %in% c("scaffold_222_273845", "scaffold_259_1105854", "scaffold_138_1235535")) %>% # the on-target % looked bad.
+  left_join(., prior_conc_df) %>%
+  filter(cherrypick_ul != "0") %>%
+  arrange(desc(flashed_reads)) %>%
+  mutate(read_ul_ratio = flashed_reads/cherrypick_ul) %>%
+  arrange(read_ul_ratio) %>% 
+  #write_csv("csv_outputs/intermed_gtseq_test3_primer_updates.csv")
+  ggplot(aes(x = flashed_reads, y = cherrypick_ul)) +
+  geom_point()
+
+```
+The read/ul ratio indicates how many reads are produced per ul of primer set. In this case, overampers will have a very high ratio and underperformers a low ratio.
+
+I think we can leave 5 ul as the max cherrypick volume and drop everything else relative to that.
+
+For genotyping, in this run, I'd like around 5000 reads/locus (~50 reads per locus/indiv).
+
+
+```{r}
+conc_tmp <- loc.list %>%
+  anti_join(., droppers) %>%
+  filter(!R1_reads == 0,
+         !Locus %in% c("scaffold_222_273845", "scaffold_259_1105854")) %>% # the on-target % looked bad.
+  left_join(., prior_conc_df) %>%
+  filter(cherrypick_ul != "0") %>%
+  arrange(desc(flashed_reads)) %>%
+  mutate(read_ul_ratio = flashed_reads/cherrypick_ul) %>%
+  arrange(read_ul_ratio) 
+
+# deal with the individual categories separately
+conc_tmp %>%
+  filter(flashed_reads < 1000, cherrypick_ul > 2.5) %>%
+  mutate(new_ul = 5)
+
+```
+
+
+
+```{r}
+test4_file <- conc_tmp %>%
+  mutate(multiplier = ifelse(flashed_reads < 100, 3, NA)) %>%
+    mutate(multiplier = ifelse(flashed_reads < 1000 & flashed_reads > 100, 2, multiplier)) %>%
+     mutate(multiplier = ifelse(flashed_reads < 5000 & flashed_reads >= 1000, 1.5, multiplier)) %>%
+      mutate(multiplier = ifelse(flashed_reads > 5000 & flashed_reads < 10000, 1, multiplier)) %>%
+        mutate(multiplier = ifelse(flashed_reads > 10000 & flashed_reads < 60000, 0.5, multiplier)) %>%
+           mutate(multiplier = ifelse(flashed_reads > 60000, 0.25, multiplier)) %>%
+  mutate(new_ul = round(multiplier*cherrypick_ul/3, digits = 2)) %>% #%>% # make it so the max volume is 5 for any given primer pair
+  #summarise(sum(new_ul))
+  select(`Plate Name`, `Well Position`, Locus, new_ul)
+
+# make sure there aren't droppers in there...
+droppers %>%
+  left_join(., test4_file)
+
+```
+
+
+```{r}
+test4_file %>%
+  write_csv("csv_outputs/BFALgtseq_test4_primer_conc_for_cherrypick.csv")
+
+  
+```
+
+
+I have too many loci still included. I should be down to the 266 from the filtering steps above.
+
+
+
+```{r}
+tmp %>%
+  left_join(droppers, by = c("locus" = "Locus"))
+```
+
+
+When making the cherrypick file, Claire reminded me that we try not to use the Janus for < 1 ul cherrypicking. In that case, we'll leave in all of the loci at > 0.5 ul, but add in the remaining loci by hand.
+
+```{r}
+test4_file %>%
+  arrange(new_ul)
+
+```
+
+
+Total sum of volume to calculate amount of TE to add:
+```{r}
+test4_file %>%
+  summarise(sum(new_ul)) %>%
+  mutate(TE = 1000-`sum(new_ul)`)
+```
+
