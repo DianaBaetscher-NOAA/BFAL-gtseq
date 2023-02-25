@@ -9,3 +9,8 @@
 .BFALgtseq_test1_idx/
 .rds_files/
 .microhaplot/
+.Rmd/06-vcf-exploration.Rmd/
+.Rmd/07-BFAL-reference-baseline.Rmd/
+.Rmd/07-BFAL-reference-baseline.nb.html/
+.Rmd/08-bycatch-mixture-analysis.nb.html/
+.Rmd/08-bycatch-mixture-analysis.Rmd/

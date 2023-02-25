@@ -1,0 +1,627 @@
+---
+title: "04-BFALgtseq-test4"
+output: html_notebook
+---
+
+1 February 2023
+
+
+One primer pool.
+
+
+## Taking a look at output from GTscore
+
+
+```{r}
+library(tidyverse)
+```
+
+
+The plot we want is the R1 reads where the FWD primer was found vs. the flashed read where the FWD primer was found.
+
+
+```{r}
+# read in the GTscore output
+
+flashed <- read_tsv("../data/test4/flashed_locusSummary.txt") %>%
+  select(Locus, `Primer Reads`) %>%
+  rename(flashed_reads = `Primer Reads`)
+
+R1 <- read_tsv("../data/test4/R1_locusSummary.txt") %>%
+  select(Locus, `Primer Reads`) %>%
+  rename(R1_reads = `Primer Reads`)
+```
+
+
+
+Look at those two df combined based on locus
+```{r}
+combo_df <- R1 %>%
+  left_join(., flashed, by = "Locus")
+
+combo_df %>%
+  summarise(sum(R1_reads))
+
+combo_df %>%
+  summarise(sum(flashed_reads))
+```
+
+```{r}
+# how many had 0 reads
+combo_df %>%
+  filter(R1_reads == 0)
+
+```
+
+
+```{r}
+combo_df %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads)) +
+  geom_point() +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+
+```
+
+
+```{r}
+# create a proportion difference
+combo_df %>%
+  mutate(prop = flashed_reads/R1_reads) %>%
+  ggplot(aes(x = prop)) +
+  geom_histogram() +
+  labs(x = "proportion of R1 that also merged",
+       title = "BFAL proportion of on-target reads") +
+  theme_minimal()
+
+
+```
+
+
+```{r}
+combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.5 & R1_reads >5000, "drop", "ok")) %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads, color = status)) +
+  geom_point() +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+
+```
+
+
+
+
+Take a closer look at the loci that are still off-target. Otherwise, this looks pretty decent.
+
+```{r}
+droppers <- combo_df %>%
+  filter(!R1_reads == 0) %>% # these correspond to the 18 loci that I removed based on the first iteration.
+  mutate(prop = flashed_reads/R1_reads) %>%
+  #filter(prop < 0.75 & R1_reads > 10000) %>% # how many loci with < 75% on-target?
+  mutate(status = ifelse(prop < 0.5 & R1_reads >5000, "drop", "ok")) %>%
+  filter(status == "drop") %>%
+  arrange(desc(R1_reads))
+
+droppers$Locus <- gsub("BFAL_", "", droppers$Locus)
+```
+
+So for those 8, where did they fall previously?
+
+```{r}
+prior <- read_csv("csv_outputs/BFALgtseq_test4_primer_conc_for_cherrypick.csv")
+```
+
+```{r}
+prior %>%
+  left_join(., droppers) %>%
+  arrange(R1_reads)
+```
+
+Interesting. So I increased the primer conc. on some of those loci and decreased it on others. Either way, I think I kick them out and then try genotyping multiple plates.
+
+Maybe reduce the primer concentration on any loci with > 25,000 flashed reads:
+```{r}
+overampers <- combo_df %>%
+  filter(flashed_reads > 25000) 
+
+overampers$Locus <- gsub("BFAL_", "", overampers$Locus)
+
+# reduce the concentration of overamplifying loci 
+new_overamper_conc <- overampers %>%
+  anti_join(., droppers) %>%
+  left_join(., prior) %>%
+  mutate(new_ul = ifelse(new_ul == 0.83, 0.5, 1))
+
+```
+
+```{r}
+# beginning with the prior concentrations
+# remove the loci to drop from round 4
+# add the reduced primer concentration for the overampers
+# remove the locus that has >2 alleles in many individuals (based on below)
+tent_test5 <- prior %>%
+  anti_join(., droppers) %>%
+  anti_join(., overampers) %>%
+  bind_rows(new_overamper_conc) %>%
+  select(-R1_reads, -flashed_reads) %>%
+  arrange(`Plate Name`, `Well Position`) %>%
+  filter(Locus != "scaffold_519_157242")
+
+```
+```{r}
+combo_df %>%
+  filter(Locus %in% c("scaffold_608_211809", "scaffold_700_166185", "scaffold_37_1483238", "scaffold_48_3128896", "scaffold_453_725072", "scaffold_298_460712", "scaffold_1273_1937", "scaffold_336_592609"))
+  
+```
+Keep these, but add anything < 1 ul by hand: if >5k reads
+
+
+
+Final question: do I want to bump up the concentration of any of the low loci?
+
+```{r}
+# which loci are really struggling
+# and either could use additional volume
+# or should be dropped
+combo_df %>%
+  anti_join(., overampers) %>%
+  anti_join(., droppers) %>%
+  filter(R1_reads < 2000, flashed_reads > 0) %>%
+  left_join(., prior)
+  
+
+```
+
+Take a look at some of the true losers here: < 1000 reads and volume bumped up to 5 ul!
+
+```{r}
+combo_df %>%
+  anti_join(., overampers) %>%
+  anti_join(., droppers) %>%
+  filter(R1_reads < 1000, flashed_reads > 0) %>%
+  left_join(., prior)
+```
+From these, it's clear, I'll drop the ones that look like they're off-target anyway and add additional volume to the keepers that I had reduced way down:
+
+```{r}
+test5_primer_pool <- tent_test5 %>%
+  mutate(new_ul = ifelse(Locus %in% c("scaffold_75_1184494", "scaffold_925_195188", "scaffold_1226_115783"), 1, new_ul)) %>%
+  mutate(new_ul = ifelse(Locus == "scaffold_273_874676", 4, new_ul))
+
+
+```
+
+
+
+
+Take a quick look at the distribution of reads for different volumes of primer sets.
+
+```{r}
+combo_df$Locus <- gsub("BFAL_", "", combo_df$Locus)
+```
+
+
+```{r}
+combo_df %>%
+  left_join(prior) %>%
+  #filter(flashed_reads < 5000) %>%
+  ggplot(aes(x = new_ul, y = flashed_reads)) +
+  geom_point()
+
+```
+
+
+
+
+
+## Looking at genotypes from the .rds file
+
+
+
+1. Do I have the read depth per locus to genotype these samples
+2. Are there any loci that are mis-behaving? (>2 haplotypes per individual after filtering for read depth)
+
+Take a look at the file produced by microhaplot from Sedna.
+```{r}
+test4 <- read_rds("../microhaplot/BFALgtseq_test4.rds")
+```
+
+
+```{r}
+genos <- test4 %>% 
+  select(group, id, locus, haplo, depth, allele.balance, rank)
+  
+  
+genos$locus <- gsub("_PCR_Product", "", genos$locus)
+```
+
+How many individuals in this file?
+```{r}
+genos %>%
+  group_by(id) %>%
+  tally()
+
+```
+93 individuals out of 96 (including the blank, NTC)
+
+```{r}
+genos %>%
+  group_by(locus) %>%
+  tally()
+
+```
+
+
+Key question: 
+
+how many alleles per individual (above what depth threshold)?
+```{r}
+genos %>%
+  anti_join(., droppers, by = c("locus" = "Locus")) %>%
+  filter(rank != 1 & allele.balance < 0.5) %>%
+  group_by(locus) %>%
+  tally()
+
+
+```
+
+
+
+```{r}
+multi_haps <- genos %>%
+  anti_join(., droppers, by = c("locus" = "Locus")) %>%
+  arrange(locus, id) %>%
+  filter(depth > 10) %>%
+  group_by(id, locus) %>%
+  add_tally() %>%
+  filter(n > 2) %>%
+  ungroup() %>%
+  select(locus) %>%
+  unique() # how many loci?
+
+multi_haps %>%
+  left_join(., combo_df, by = c("locus" = "Locus")) %>%
+   ggplot(aes(x = flashed_reads, y = R1_reads)) +
+  geom_point() +
+  geom_abline(linetype = "dotted") +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+# clearly not off-target
+```
+
+
+
+```{r}
+multi_haps %>%
+  left_join(., genos) %>%
+  ggplot(aes(x = depth)) +
+  geom_histogram() +
+  facet_grid(rows = vars(locus))
+  
+```
+
+```{r}
+multi_haps %>%
+  left_join(., genos) %>%
+  group_by(locus, id) %>%
+  filter(depth < 10) %>% 
+  tally() %>%
+  filter(n > 2)
+
+```
+Interesting! So with a read depth > 20, all of the loci behave.
+
+Use a combination of read depth and allele balance filters to remove spurious alleles caused by sequencing error.
+
+
+
+```{r}
+# filter
+genos_10reads <- genos %>%
+  anti_join(., droppers, by = c("locus" = "Locus")) %>%
+  arrange(locus, id) %>%
+  filter(depth > 10,
+         allele.balance > 0.4)
+  
+# check for loci with >2 alleles in any indiv
+genos_10reads %>%
+  group_by(locus, id) %>%
+  tally() %>%
+  filter(n > 2)
+
+```
+All in the same locus. Let's drop that one.
+
+But take a look, first.
+
+```{r}
+genos_10reads %>%
+  filter(locus == "scaffold_519_157242")
+```
+Very sketchy.
+
+Filter it out.
+```{r}
+genos_10reads %>%
+  filter(locus != "scaffold_519_157242")
+  
+```
+
+Which ones are missing?
+
+```{r}
+no_genos <- prior %>%
+  anti_join(., genos, by = c("Locus" = "locus"))
+
+```
+Hmm. Okay, that's a lot of potential drop-out.
+
+
+```{r}
+combo_df %>%
+  right_join(., no_genos) %>%
+  filter(flashed_reads > 5000) %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads)) +
+  geom_point() +
+  geom_abline(linetype = "dotted") +
+  labs(title = "BFAL flashed vs. unmerged reads") +
+  theme_minimal()
+  
+```
+
+
+```{r}
+combo_df %>%
+  right_join(., no_genos) %>%
+  filter(new_ul > 2.5)
+
+```
+
+Trying to figure out why some loci were not included in the rds files...
+could it be because those loci have no variation in the set of samples genotyped in this 96-plate?
+```{r}
+pos.info <- read_rds("../microhaplot/BFALgtseq_test4_posinfo.rds")
+
+pos.info
+```
+
+Freebayes filtering step:
+
+--haplotype-length 0 -kwVa -X -u -i -f
+
+  -X --throw-away-mnp-obs     Remove MNP observations from input.
+  -u --throw-away-complex-obs Remove complex allele observations from input.
+  -i --throw-away-indels-obs  Remove indel observations from input.
+
+
+
+
+If that's the case, just take a peak at a PCA for these filtered genotypes to evaluate whether there's any obvious structure among these bycatch samples.
+
+The format I need for the PCA is strata, indiv, markers, genotype (allele idx)
+
+```{r}
+# here is the starting dataframe
+tmp_df <- genos_10reads %>%
+  filter(locus != "scaffold_519_157242") %>%
+  rename(indiv = id, allele = haplo, gene_copy = rank) %>%
+  arrange(indiv, locus, gene_copy, allele) %>%
+  select(-allele.balance, -depth)
+
+expanded.df <- tmp_df %>%
+  select(indiv) %>%
+  unlist() %>%
+  unname() %>%
+  expand.grid(indiv = ., locus = unique(tmp_df$locus), gene_copy = 1:2, stringsAsFactors = FALSE) %>%
+  as_tibble() %>%
+  left_join(., tmp_df) %>%
+  arrange(indiv, locus, gene_copy, allele) %>%
+  unique() %>%
+  mutate(group = "BFAL")
+
+expanded.df %>%
+  group_by(indiv, locus) %>%
+  mutate(allele = ifelse(gene_copy == 2 & is.na(allele), "test", allele)) %>%
+  filter(allele == "test")
+
+
+#   mutate(across(c(indiv, locus),
+#                 ~ifelse(gene_copy == 2 & is.na(allele),
+#                         .[gene_copy == 1 & !is.na(allele)], .)))
+
+```
+
+```{r}
+in_need_of_gene1 <- expanded.df %>%
+  filter(gene_copy == 2 & is.na(allele)) %>%
+  select(-allele)
+
+hets <- expanded.df %>%
+  filter(gene_copy == 2 & !is.na(allele)) %>%
+  select(indiv, locus)
+  # left_join(., expanded.df, by = c("indiv", "locus")) %>%
+  # filter(gene_copy.x != gene_copy.y)
+
+full_het_df <- hets %>%
+  left_join(., expanded.df)
+  
+
+# create a dataframe with the alleles to join to the gene_copy 2
+homozygotes_to_join <- expanded.df %>%
+  anti_join(., hets) %>%
+  filter(gene_copy == 1) %>%
+  select(indiv, locus, allele)
+
+hom_genecopy1 <- homozygotes_to_join %>%
+  select(-allele) %>%
+  left_join(., expanded.df) %>%
+  filter(gene_copy != 2)
+
+# join the alleles to the homozygotes
+hom_genecopy2 <- in_need_of_gene1 %>%
+  left_join(homozygotes_to_join)
+
+# put all pieces back together:
+complete_df <- hom_genecopy2 %>%
+  bind_rows(., full_het_df, hom_genecopy1) %>%
+  arrange(indiv, locus, gene_copy)
+
+```
+
+
+```{r}
+# look at the missing data per locus
+complete_df %>%
+  filter(is.na(allele)) %>%
+  group_by(locus) %>%
+  tally() %>%
+  arrange(desc(n))
+
+# remove any locus with >50% missing data
+# for 96 inds
+loci_keepers <- complete_df %>%
+  filter(is.na(allele)) %>%
+  group_by(locus) %>%
+  tally() %>%
+  filter(n < 96) %>% # how many missing alleles?
+  select(-n)
+
+```
+
+
+
+
+```{r}
+# just the loci with enough data across all samples
+genos_ordered_df <- loci_keepers %>%
+  left_join(., complete_df)
+
+```
+
+```{r}
+# first make integers of the alleles
+alle_idxs <- genos_ordered_df %>% 
+  dplyr::select(indiv, locus, gene_copy, allele) %>%
+  group_by(locus) %>%
+  mutate(alleidx = as.integer(factor(allele, levels = unique(allele)))) %>%
+  ungroup() %>%
+  arrange(indiv, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
+```
+
+Make the df match the requirements for tidy_genomic_data
+```{r}
+long_df <- alle_idxs %>%
+  select(-allele, -gene_copy) %>%
+  mutate(group = "BFAL") %>%
+  #left_join(., spp_indiv) %>%
+  #select(species, everything()) %>%
+  rename(INDIVIDUALS = indiv, STRATA = group, MARKERS = locus, GT = alleidx)
+
+```
+
+Genotypes should be coded with 3 integers for each alleles. 6 integers in total for the genotypes. e.g. 001002 or 111333 (for heterozygote individual). 6 integers WITH separator: e.g. 001/002 or 111/333 (for heterozygote individual). The separator can be any of these: "/", ":", "_", "-", ".", and will be removed.
+
+
+```{r}
+#library("DescTools")
+
+# create 3 digit integers from the genotypes
+long_df$GT3 <- Format(long_df$GT, ldigits = 3, digits = 0)
+
+head(long_df)
+
+# NAs hold
+# long_df %>%
+#   filter(is.na(GT3))
+
+# fix NAs
+long_df0s <- long_df %>%
+  mutate(GT3 = ifelse(is.na(GT3), "000", GT3))
+```
+
+
+Now combine the GT3 column per indiv/marker:
+
+```{r}
+# make the genos characters and then try pasting them as strings
+long_df0s$GT3 <- as.character(long_df0s$GT3)
+
+long_df3digit <- long_df0s %>%
+  group_by(INDIVIDUALS, MARKERS) %>% 
+  arrange(GT3, .by_group = TRUE) %>% 
+  summarise(GENOTYPE = toString(GT3))
+  
+# paste strings together
+long_df3digit$GENOTYPE <- gsub(", ","",long_df3digit$GENOTYPE)
+
+
+# add back on species identity as strata
+df_for_conversion <- long_df0s %>% 
+  select(-GT, -GT3) %>%
+  left_join(., long_df3digit) %>%
+  unique() %>%
+  rename(GT = GENOTYPE) %>%
+  mutate(GT = ifelse(GT == "000000", NA, GT))
+
+df_for_conversion$STRATA <- as.factor(df_for_conversion$STRATA)
+
+# check on NAs here
+df_for_conversion %>%
+  filter(str_detect(INDIVIDUALS, "s"))
+```
+
+
+
+```{r convert-df-to-genind}
+library(radiator)
+# use the radiator package for this conversion
+genind_df <- write_genind(df_for_conversion)
+```
+
+
+Now that the data is a genind object, go ahead and run the PCA.
+
+Make PCA
+```{r dataset-pca}
+library(adegenet)
+# Allele presence absence data are extracted and NAs replaced using tab:
+datasetX <- tab(genind_df, NA.method="mean") # double check that is this the appropriate method.
+
+# make PCA
+dataset_pca1 <- dudi.pca(datasetX, center = TRUE, scannf = FALSE, scale=FALSE, nf = 1000)
+
+# colors
+mycol <- colorRampPalette(c("darkgreen", "deepskyblue", "aquamarine4", "seagreen4", "cadetblue", "cyan", "darkblue", "midnightblue", "blue", "dodgerblue", "darkcyan", "darkslateblue", "slateblue", "steelblue4", "skyblue", "paleturquoise4", "brown", "royalblue", "purple4", "orange", "darkorange", "darkgoldenrod", "chocolate", "tan4", "saddlebrown", "sienna", "navajowhite4", "darkgray", "black", "pink"))(55)
+
+# plot with factor labels
+pdf("pdf_outputs/BFALgtseq_test4_pca.pdf", width = 10, height = 10)
+s.class(dataset_pca1$li, fac=pop(genind_df), wt = rep(1, length(pop(genind_df))), clabel = .8, grid = FALSE, cellipse = 2,
+        xax=1, yax=2, col=transp(mycol,.8),
+        axesel=FALSE, cstar=0, cpoint=1)
+dev.off()
+
+```
+
+Okay, there's definitely some separation for some samples...
+
+It would be nice to know if 121 loci are sufficient, because then I could put more plates on a given sequencing run with fewer loci.
+
+Seems like the thing to do would be to run the plate and a half of reference samples with all loci and those that don't have useful variation could be dropped.
+
+
+
+Output the concentrations for test5/genotyping baseline:
+```{r}
+primerpool <- test5_primer_pool %>% # do a little formatting
+  mutate(`Destination Plate` = "BFALgtseq_test5",
+         `Destination Well` = "NA")
+
+primerpool$`Plate Name` <- gsub("R", "", primerpool$`Plate Name`)
+
+primerpool %>%
+  write_csv("csv_outputs/BFALgtseq_test5_primer_cherrypick.csv")
+```
+

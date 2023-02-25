@@ -1,0 +1,370 @@
+---
+title: "09-reference-baseline-mixture-analysis"
+output: html_notebook
+---
+
+23 February 2023
+
+
+
+Implementing the functions for reading in genos from the rds files created by microhaplot.
+
+I used `R-main/01-compile-and-tidy-rds-files.R` to generate an rds file with the genotype info in `data/processed`.
+
+The R function uses a minimum read depth of 10 reads for the first allele and 6 reads for the second allele and a minimum allele balance of 0.4 (this can be modified in `R/microhaplot-genos-funcs.R`).
+
+The VCF file used to generate these rds files is `BFAL_reference_filtered.vcf`, currently on Sedna. I might return to this by merging additional samples into that VCF file, but those would be bycatch - not reference samples - and the benefit to doing so is uncertain.
+
+
+
+
+```{r load-libraries}
+library(tidyverse)
+library(readxl)
+library(stringr)
+library(lubridate)
+```
+
+
+```{r}
+# read in rds file with genotypes
+genos_long <- read_rds("../data/processed/called_genos.rds")
+
+head(genos_long)
+```
+
+I need to vet both the loci and the individuals for missing data, etc.
+
+## Locus evaluation
+
+How many loci and how many alleles?
+```{r}
+# alleles
+genos_long %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique()
+
+# loci
+genos_long %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique() %>%
+  group_by(locus) %>%
+  tally() %>%
+  arrange(desc(n))
+
+  
+```
+484 alleles across 190 loci with between 1-8 alleles per locus.
+
+Missing data:
+```{r}
+# missing data across loci
+locs_to_toss <- genos_long %>%
+  group_by(locus) %>%
+  mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
+  summarise(sum(missingness)) %>% # 190 loci x2 = total
+  filter(`sum(missingness)`>190) %>% # more than 50% missing data
+  select(locus) # drop those loci for now and see how the assignment goes
+
+# just the keepers
+genos_locs_filtered <- genos_long %>%
+  anti_join(., locs_to_toss)
+
+```
+```{r}
+# summary of remaining loci
+genos_locs_filtered %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique()
+
+genos_locs_filtered %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique() %>%
+  group_by(locus) %>%
+  tally() %>%
+  arrange(desc(n))
+
+```
+398 alleles in 159 loci with 1-8 alleles per locus.
+
+
+## COME BACK TO THIS...
+
+First, look at the loci for missingness and >2 haplotypes in an individual [This might be masked by the function that reads in the rds file??]
+
+```{r}
+genos_long %>%
+  group_by(gtseq_run, id, locus) %>% # there should be no more than 2 alleles for a given indiv/locus
+  tally() %>%
+  filter(n > 2)
+
+```
+
+
+## Missing data in individuals
+
+Total number of loci = 159
+Total number of alleles = 318
+
+Total number of samples = 1,055
+
+```{r}
+inds_to_toss <- genos_locs_filtered %>%
+  group_by(gtseq_run, id) %>%
+  mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
+  summarise(sum(missingness)) %>%
+  arrange(desc(`sum(missingness)`)) %>%
+  filter(`sum(missingness)` > 63) # remove samples with >20% missing data
+
+# just the keepers
+genos_locs_ind_filtered <- genos_locs_filtered %>%
+  anti_join(., inds_to_toss)
+
+```
+There's a lot of missing data, unfortunately. We might use a higher threshold for missing data for loci to retain more individuals if possible.
+
+50% missing data threshold = 993 inds to keep.
+
+```{r}
+974/1055
+```
+Take a look at that dataset
+```{r}
+genos_locs_ind_filtered  %>%
+  unite(gtseq_run, id, col = "sample", remove = F) %>%
+  ggplot(aes(x = reorder(locus, depth), y = reorder(sample, depth), fill = log10(depth))) +
+  geom_tile()
+
+```
+
+## self-assignment 
+
+Doing a sanity check with the reference baseline
+
+```{r}
+# first make integers of the alleles
+alle_idxs <- genos_locs_ind_filtered %>% 
+  dplyr::select(gtseq_run, id, locus, gene_copy, allele) %>%
+  group_by(locus) %>%
+  mutate(alleidx = as.integer(factor(allele, levels = unique(allele)))) %>%
+  ungroup() %>%
+  arrange(gtseq_run, id, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
+
+```
+
+
+Add population information from metadata:
+```{r}
+# metadata for reference samples
+meta1 <- readxl::read_xlsx("../data/BFAL_WGS_01_finalPlateMap.xlsx", sheet = "combinedPlate1And2SamplePops")
+
+samplelist <- read_csv("../data/gtseq5_samplelist.csv") %>%
+  mutate(gtseq_run = "gtseq5") %>%
+  rename(id = sample)
+
+metadata <- samplelist %>%
+  left_join(., meta1, by = c("Sample_ID" = "ind_ID")) %>%
+  mutate(population = ifelse(!is.na(pop), pop, population)) %>%
+  mutate(population = ifelse(is.na(population), "bycatch", population)) %>%
+  select(-pop)
+
+# just reference samples
+ref_samples <- metadata %>%
+  filter(!population %in% c("bycatch","NTC")) %>%
+  select(Sample_ID, gtseq_run, id, population) %>%
+  left_join(., genos_locs_ind_filtered, by = c("gtseq_run", "id"))
+  
+ref_pops <- ref_samples %>%
+  select(gtseq_run, id, Sample_ID, population) %>%
+  unique()
+```
+
+```{r}
+alle_idxs %>%
+  filter(gtseq_run == "gtseq5") %>%
+  select(id) %>%
+  unique() %>%
+  inner_join(., ref_pops) %>%
+  left_join(., alle_idxs)
+
+```
+
+
+
+```{r}
+# format for rubias
+reference <- alle_idxs %>%
+  inner_join(., ref_pops) %>%
+  select(-allele, -gtseq_run, -id) %>%
+  select(population, Sample_ID, everything()) %>%
+  rename(collection = population, indiv = Sample_ID)
+
+# make two-col format
+ref_two_col <- reference %>%
+  unite("loc", 3:4, sep = ".") %>%
+  pivot_wider(names_from = loc, values_from = alleidx) %>%
+  mutate(repunit = collection) %>%
+  mutate(sample_type = "reference") %>%
+  select(sample_type, repunit, collection, everything())
+
+```
+
+
+```{r}
+# self-assignment
+baseline_assign <- rubias::self_assign(ref_two_col, gen_start_col = 5)
+
+```
+
+```{r}
+top_assign <- baseline_assign %>%
+  group_by(indiv) %>%
+  slice_max(., order_by = scaled_likelihood) 
+
+top_assign %>% # top assignment for each sample
+  ggplot(aes(x = scaled_likelihood)) +
+  geom_histogram()
+
+```
+Looks like below 90% would be a reasonable cut-off?
+
+```{r}
+top_assign %>%
+  filter(repunit != inferred_collection, 
+         scaled_likelihood > 0.9) %>%
+  ggplot(aes(x = scaled_likelihood)) +
+  geom_histogram()
+
+```
+10 mis-assignments, but only 4 with a scaled-likelihood > 0.9 and all of those are within the Hawaiian colonies.
+
+Pretty good!
+
+So overall:
+
+```{r}
+top_assign %>%
+  filter(scaled_likelihood > 0.9 &
+         collection == inferred_collection)
+```
+129 samples in the reference baseline (10 dropped out bec of missing data).
+
+90% of samples correctly assigned at 90% scaled likelihood.
+```{r}
+117/129
+```
+If we only look at samples that were assigned at > 90% threshold:
+```{r}
+top_assign %>%
+  filter(scaled_likelihood > 0.9)
+```
+```{r}
+117/121
+```
+Which would be 97% accurate assignment.
+
+Quick look at z-scores:
+
+```{r}
+top_assign %>%
+  ggplot(aes(z_score)) +
+  geom_histogram()
+
+
+```
+Woah. There's an outlier.
+
+```{r}
+top_assign %>%
+  filter(z_score < -3)
+
+```
+Maybe a different species accidentally? I can double-check the sample number with metadata that Jessie sent. Other than that, things are looking good to proceed with mixture assignment.
+
+
+## Mixture bycatch assignment
+
+
+```{r}
+# get the format right
+mix_two_col <- alle_idxs %>%
+  anti_join(., ref_pops) %>%
+  unite(gtseq_run, id, col = "indiv", sep = "_") %>%
+  select(-allele) %>%
+  unite("loc", 2:3, sep = ".") %>%
+  pivot_wider(names_from = loc, values_from = alleidx) %>%
+  mutate(repunit = NA) %>%
+  mutate(sample_type = "mixture") %>%
+  mutate(collection = "bycatch") %>%
+  select(sample_type, repunit, collection, everything())
+
+mix_two_col$repunit <- as.character(mix_two_col$repunit)
+head(mix_two_col)
+
+```
+
+```{r}
+# for whatever reason, rubias is being finicky about the format and it's easiest to do this
+# to make sure both df are consistent
+tmp <- bind_rows(ref_two_col, mix_two_col)
+
+mix <- tmp %>%
+  filter(sample_type == "mixture")
+
+ref <- tmp %>%
+  filter(sample_type == "reference")
+```
+
+
+```{r}
+# mixture analysis
+bycatch_assign <- rubias::infer_mixture(reference = ref, mixture = mix, gen_start_col = 5)
+
+```
+
+Bycatch results for mixture
+```{r}
+mix_assigned <- bycatch_assign$indiv_posteriors %>%
+  group_by(indiv) %>%
+  slice_max(., order_by = PofZ)
+
+
+# distribution of PofZ for top assignments
+mix_assigned %>%
+  ggplot(aes(x = PofZ)) +
+  geom_histogram()
+
+```
+845 bycatch samples, most of which are assigned at high probability.
+
+
+```{r}
+mix_assigned %>%
+  filter(PofZ > 0.9)
+
+```
+
+Before going deeper into the assignment results, let's just confirm the loci we're using are okay.
+
+
+Output genotypes/data for evaluating the loci in `10-locus-summary-and-eval.Rmd`
+
+```{r}
+# save outputs
+tmp %>%
+  write_csv("csv_outputs/two_column_dataset.csv")
+
+genos_locs_ind_filtered %>%
+  write_rds("../data/processed/genotypes_loc_ind_filtered.rds")
+
+alle_idxs %>%
+  write_rds("../data/processed/alle_idxs.rds")
+
+reference %>%
+  write_rds("../data/processed/reference_genos.rds")
+```
+

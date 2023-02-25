@@ -1,0 +1,680 @@
+---
+title: "05-gtseq-test5-plus-reference-baseline"
+output: html_notebook
+---
+
+
+9 February 2023
+
+This is superceded by `09-reference-baseline-mixture-analysis.Rmd`
+
+
+Looking at the latest iteration of the primer pool and using the reference baseline to determine whether we're good to begin genotyping all the bycatch samples.
+
+
+```{r}
+library(tidyverse)
+
+```
+
+
+
+## Looking at genotypes from the .rds file
+
+
+
+1. Do I have the read depth per locus to genotype these samples
+2. Are there any loci that are mis-behaving? (>2 haplotypes per individual after filtering for read depth)
+
+Take a look at the file produced by microhaplot from Sedna.
+```{r}
+test5 <- read_rds("../microhaplot/BFALgtseq_test5.rds")
+pos.info <- read_rds("../microhaplot/BFALgtseq_test5_posinfo.rds")
+
+```
+Now that I'm attempting to run freebayes over a bunch of samples and it is running out of memory (using all 24 cores of a high-mem node on sedna), I wondering if the loci that dropped out are just because freebayes actually failed to complete the analysis and aborted?
+
+UPDATE: yes. Now I've recovered 190 loci... indicating that there were memory issues that caused locus drop-out and not just invariant loci. I still wonder about the rest of the loci - there might be more optimizing to do on the Sedna/memory allocation part of this. I'll check in with Sara and see what she's doing.
+
+
+
+How many total reads are accounted for?
+
+```{r}
+test5 %>%
+  summarise(sum(depth))
+
+```
+
+
+
+
+
+```{r}
+genos <- test5 %>% 
+  select(group, id, locus, haplo, depth, allele.balance, rank)
+  
+  
+genos$locus <- gsub("_PCR_Product", "", genos$locus)
+```
+
+How many individuals in this file?
+```{r}
+genos %>%
+  group_by(id) %>%
+  tally()
+
+```
+
+Key question: 
+
+how many alleles per individual (above what depth threshold)?
+```{r}
+multi_haps <- genos %>%
+  arrange(locus, id) %>%
+  filter(depth > 10,
+         allele.balance > 0.4) %>%
+  group_by(id, locus) %>%
+  add_tally() %>%
+  filter(n > 2) %>%
+  ungroup() %>%
+  select(locus) %>%
+  unique() # how many loci?
+
+```
+
+```{r}
+multi_haps %>%
+  left_join(., genos) %>%
+  arrange(id) %>%
+  filter(depth > 10,
+         allele.balance > 0.4)
+```
+
+What's the allele balance distribution for those loci?
+
+```{r}
+multi_haps %>%
+  left_join(., genos) %>%
+  filter(depth > 10 & allele.balance > 0.4) %>%
+  ggplot(aes(x = allele.balance)) +
+  geom_histogram() +
+  facet_grid(rows = vars(locus))
+
+```
+
+
+These looks funky: 
+scaffold_75_1184494
+scaffold_7_15896
+
+The others might be okay.
+
+How many individuals are involved? Possible they are cross-contaminated?
+
+```{r}
+multi_haps %>%
+  left_join(., genos) %>%
+  filter(depth > 10 & allele.balance > 0.4) %>%
+  group_by(id, locus) %>%
+  tally() %>%
+  filter(n > 2) %>%
+  ungroup() %>%
+  group_by(id) %>%
+  tally() %>%
+  arrange(desc(n))
+
+```
+Doesn't look like there are any issues with the individual samples.
+
+
+
+
+Now look at read depths across loci:
+
+```{r}
+# pre-filtering
+genos %>%
+  group_by(locus) %>%
+  summarise(sum(depth)) %>%
+  arrange(desc(`sum(depth)`)) %>%
+  ggplot(aes(x = reorder(locus, `sum(depth)`), y = `sum(depth)`)) +
+  geom_point() +
+  theme(axis.text.x = element_text(angle = 90))
+
+```
+The overamplifier is also a multiple-haplotype locus. That tracks.
+
+Seems like not that many loci in the genos output...
+
+```{r}
+pos.info
+
+```
+
+That is weird. There are only 53 loci that are genotyped from the ~270 when I'm looking at the reference samples as well!
+UPDATE: the number of loci in the new freebayes run includes 190 loci... still missing a bunch, but should do much better for pop assignment.
+
+
+Filter the data for quality and go from there...
+```{r}
+genos_filt <- genos %>%
+  filter(depth > 10 & allele.balance > 0.4
+         & locus != "scaffold_75_1184494") 
+  
+  
+```
+
+
+
+## Taking data through to a PCA
+
+
+If that's the case, just take a peak at a PCA for these filtered genotypes to evaluate whether there's any obvious structure among these bycatch samples.
+
+The format I need for the PCA is strata, indiv, markers, genotype (allele idx)
+
+```{r}
+# here is the starting dataframe
+tmp_df <- genos_filt %>%
+  rename(indiv = id, allele = haplo, gene_copy = rank) %>%
+  arrange(indiv, locus, gene_copy, allele) %>%
+  select(-allele.balance, -depth)
+
+expanded.df <- tmp_df %>%
+  select(indiv) %>%
+  unlist() %>%
+  unname() %>%
+  expand.grid(indiv = ., locus = unique(tmp_df$locus), gene_copy = 1:2, stringsAsFactors = FALSE) %>%
+  as_tibble() %>%
+  left_join(., tmp_df) %>%
+  arrange(indiv, locus, gene_copy, allele) %>%
+  unique() %>%
+  mutate(group = "BFAL")
+
+expanded.df %>%
+  group_by(indiv, locus) %>%
+  mutate(allele = ifelse(gene_copy == 2 & is.na(allele), "test", allele)) %>%
+  filter(allele == "test")
+
+
+#   mutate(across(c(indiv, locus),
+#                 ~ifelse(gene_copy == 2 & is.na(allele),
+#                         .[gene_copy == 1 & !is.na(allele)], .)))
+
+```
+
+```{r}
+in_need_of_gene1 <- expanded.df %>%
+  filter(gene_copy == 2 & is.na(allele)) %>%
+  select(-allele)
+
+hets <- expanded.df %>%
+  filter(gene_copy == 2 & !is.na(allele)) %>%
+  select(indiv, locus)
+  # left_join(., expanded.df, by = c("indiv", "locus")) %>%
+  # filter(gene_copy.x != gene_copy.y)
+
+full_het_df <- hets %>%
+  left_join(., expanded.df)
+  
+
+# create a dataframe with the alleles to join to the gene_copy 2
+homozygotes_to_join <- expanded.df %>%
+  anti_join(., hets) %>%
+  filter(gene_copy == 1) %>%
+  select(indiv, locus, allele)
+
+hom_genecopy1 <- homozygotes_to_join %>%
+  select(-allele) %>%
+  left_join(., expanded.df) %>%
+  filter(gene_copy != 2)
+
+# join the alleles to the homozygotes
+hom_genecopy2 <- in_need_of_gene1 %>%
+  left_join(homozygotes_to_join)
+
+# put all pieces back together:
+complete_df <- hom_genecopy2 %>%
+  bind_rows(., full_het_df, hom_genecopy1) %>%
+  arrange(indiv, locus, gene_copy)
+
+```
+
+
+```{r}
+# look at the missing data per locus
+complete_df %>%
+  filter(is.na(allele)) %>%
+  group_by(locus) %>%
+  tally() %>%
+  arrange(desc(n))
+
+# remove any locus with >50% missing data
+# for 384 inds
+loci_keepers <- complete_df %>%
+  filter(is.na(allele)) %>%
+  group_by(locus) %>%
+  tally() %>%
+  filter(n < 85) %>% # how many missing alleles?
+  select(-n)
+
+# ignore that filter for now
+```
+
+
+```{r}
+# just the loci with enough data across all samples
+genos_ordered_df <- loci_keepers %>%
+  left_join(., complete_df)
+
+#genos_ordered_df <- complete_df
+```
+
+```{r}
+# first make integers of the alleles
+alle_idxs <- genos_ordered_df %>% 
+  dplyr::select(indiv, locus, gene_copy, allele) %>%
+  group_by(locus) %>%
+  mutate(alleidx = as.integer(factor(allele, levels = unique(allele)))) %>%
+  ungroup() %>%
+  arrange(indiv, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
+```
+
+
+Missing data for individuals?
+```{r}
+# if there are a total of ~53 loci, then that would be 106 alleles
+# for a 50% missing data filter, we would ditch any individual with < 50 loci
+ind_keepers <- alle_idxs %>%
+  filter(is.na(allele)) %>%
+  unique() %>%
+  group_by(indiv) %>%
+  tally() %>%
+  arrange(desc(n)) %>%
+  filter(n < 10) %>%
+  select(-n)
+
+
+# now select just those indivs for the PCA
+keeper_df <- ind_keepers %>%
+  left_join(., alle_idxs)
+
+```
+
+
+Make the df match the requirements for tidy_genomic_data
+```{r}
+long_df <- alle_idxs %>%
+  select(-allele, -gene_copy) %>%
+  mutate(group = "BFAL") %>%
+  #left_join(., spp_indiv) %>%
+  #select(species, everything()) %>%
+  rename(INDIVIDUALS = indiv, STRATA = group, MARKERS = locus, GT = alleidx)
+
+```
+
+Genotypes should be coded with 3 integers for each alleles. 6 integers in total for the genotypes. e.g. 001002 or 111333 (for heterozygote individual). 6 integers WITH separator: e.g. 001/002 or 111/333 (for heterozygote individual). The separator can be any of these: "/", ":", "_", "-", ".", and will be removed.
+
+
+Add population information from metadata:
+
+```{r}
+# metadata for reference samples
+meta1 <- readxl::read_xlsx("../data/BFAL_WGS_01_finalPlateMap.xlsx", sheet = "combinedPlate1And2SamplePops")
+
+samplelist <- read_csv("../data/gtseq5_samplelist.csv")
+
+metadata <- samplelist %>%
+  left_join(., meta1, by = c("Sample_ID" = "ind_ID")) %>%
+  mutate(population = ifelse(!is.na(pop), pop, population)) %>%
+  mutate(population = ifelse(is.na(population), "bycatch", population)) %>%
+  select(-pop)
+
+metadata %>%
+  filter(population != "bycatch")
+```
+
+
+```{r}
+tmp <- long_df %>%
+  left_join(., metadata, by = c("INDIVIDUALS" = "sample")) %>%
+  select(-Sample_Well, -Sample_Plate, -Sample_ID)
+
+
+long_df_strata <- tmp %>%
+  mutate(STRATA = population) %>%
+  select(STRATA, everything()) %>%
+  select(-population)
+
+```
+
+
+```{r}
+library("DescTools")
+
+# create 3 digit integers from the genotypes
+long_df_strata$GT3 <- Format(long_df_strata$GT, ldigits = 3, digits = 0)
+
+head(long_df_strata)
+
+# NAs hold
+# long_df %>%
+#   filter(is.na(GT3))
+
+# fix NAs
+long_df0s <- long_df_strata %>%
+  mutate(GT3 = ifelse(is.na(GT3), "000", GT3))
+
+long_df0s %>%
+  filter(STRATA != "bycatch")
+```
+
+
+Now combine the GT3 column per indiv/marker:
+
+```{r}
+# make the genos characters and then try pasting them as strings
+long_df0s$GT3 <- as.character(long_df0s$GT3)
+
+long_df3digit <- long_df0s %>%
+  group_by(INDIVIDUALS, MARKERS) %>% 
+  arrange(GT3, .by_group = TRUE) %>% 
+  summarise(GENOTYPE = toString(GT3))
+  
+# paste strings together
+long_df3digit$GENOTYPE <- gsub(", ","",long_df3digit$GENOTYPE)
+
+
+# add back on species identity as strata
+df_for_conversion <- long_df0s %>% 
+  select(-GT, -GT3) %>%
+  left_join(., long_df3digit) %>%
+  unique() %>%
+  rename(GT = GENOTYPE) %>%
+  mutate(GT = ifelse(GT == "000000", NA, GT))
+
+df_for_conversion$STRATA <- as.factor(df_for_conversion$STRATA)
+
+# check on NAs here
+df_for_conversion %>%
+  filter(str_detect(INDIVIDUALS, "s"))
+
+# how many loci in the df for the PCA?
+df_for_conversion %>%
+  select(MARKERS) %>%
+  unique()
+
+```
+
+
+
+
+
+```{r convert-df-to-genind}
+library(radiator)
+# use the radiator package for this conversion
+genind_df <- write_genind(df_for_conversion)
+```
+
+
+Now that the data is a genind object, go ahead and run the PCA.
+
+Make PCA
+```{r dataset-pca}
+library(adegenet)
+# Allele presence absence data are extracted and NAs replaced using tab:
+datasetX <- tab(genind_df, NA.method="mean") # double check that is this the appropriate method.
+
+# make PCA
+dataset_pca1 <- dudi.pca(datasetX, center = TRUE, scannf = FALSE, scale=FALSE, nf = 1000)
+
+# colors
+mycol <- colorRampPalette(c("darkgreen", "deepskyblue", "orange", "brown", "magenta", "cyan", "darkblue", "midnightblue", "blue", "dodgerblue", "darkcyan", "darkslateblue", "slateblue", "steelblue4", "skyblue", "paleturquoise4", "brown", "royalblue", "purple4", "orange", "darkorange", "darkgoldenrod", "chocolate", "tan4", "saddlebrown", "sienna", "navajowhite4", "darkgray", "black", "pink"))(55)
+
+# plot with factor labels
+pdf("pdf_outputs/BFALgtseq_test5_pca.pdf", width = 10, height = 10)
+s.class(dataset_pca1$li, fac=pop(genind_df), wt = rep(1, length(pop(genind_df))), clabel = .8, grid = FALSE, cellipse = 2,
+        xax=1, yax=2, col=transp(mycol,.8),
+        axesel=FALSE, cstar=0, cpoint=1)
+dev.off()
+
+```
+I think the PCA is very sensitive to missing data because NA is coded as 000, which would make the genotypes more similar?
+
+
+
+
+
+## Look at the GTscore output... just because
+
+hopefully there's more variation that is being detected in this batch??!
+
+```{r}
+# read in the GTscore output
+
+flashed <- read_tsv("../data/gtseq_test5/flashed_locusSummary.txt") %>%
+  select(Locus, `Primer Reads`) %>%
+  rename(flashed_reads = `Primer Reads`)
+
+R1 <- read_tsv("../data/gtseq_test5/R1_locusSummary.txt") %>%
+  select(Locus, `Primer Reads`) %>%
+  rename(R1_reads = `Primer Reads`)
+```
+Look at those two df combined based on locus
+```{r}
+combo_df <- R1 %>%
+  left_join(., flashed, by = "Locus")
+
+combo_df %>%
+  summarise(sum(R1_reads))
+
+combo_df %>%
+  summarise(sum(flashed_reads))
+```
+
+
+```{r}
+combo_df %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads)) +
+  geom_point() +
+  labs(title = "BFAL flashed vs. unmerged reads: test 5") +
+  geom_abline(linetype = "dotted") +
+  theme_minimal()
+
+```
+Based on this, I would drop two loci:
+
+```{r}
+droppers <- combo_df %>%
+  filter(flashed_reads > 1000000 | Locus == "BFAL_scaffold_75_1184494")
+
+```
+Crazy. Those aren't even the loci that show up in the VCF file.
+
+
+```{r}
+# overall summary
+combo_df %>%
+  anti_join(., droppers) %>%
+  filter(flashed_reads > 0) %>%
+  ggplot(aes(x = flashed_reads, y = R1_reads)) +
+  geom_point() +
+  labs(title = "BFAL flashed vs. unmerged reads: test 5") +
+  geom_abline(linetype = "dotted") +
+  theme_minimal()
+
+```
+
+```{r}
+test6 <- combo_df %>%
+  anti_join(., droppers) %>%
+  filter(flashed_reads > 2) %>% #don't remove the low ones bec they could make the higher ones pop up!
+  #summarise(median(flashed_reads))
+  arrange(flashed_reads)
+
+```
+
+That's 265 loci, with mean flashed reads = 37,935, median 31,014, and ranging from 267 - 184,029.
+
+
+
+### Self-assignment of reference baseline
+
+
+One more thing to check:
+
+```{r}
+library(rubias)
+
+```
+```{r}
+# format for rubias
+reference <- alle_idxs %>%
+  left_join(., metadata, by = c("indiv" = "sample")) %>%
+  select(-Sample_ID, -Sample_Plate, -Sample_Well, -allele) %>%
+  filter(!population %in% c("bycatch", "NTC")) %>%
+  select(population, everything()) %>%
+  rename(collection = population)
+
+# make two-col format
+ref_two_col <- reference %>%
+  unite("loc", 3:4, sep = ".") %>%
+  pivot_wider(names_from = loc, values_from = alleidx) %>%
+  mutate(repunit = collection) %>%
+  mutate(sample_type = "reference") %>%
+  select(sample_type, repunit, collection, everything())
+
+```
+
+
+```{r}
+# self-assignment
+
+test <- rubias::self_assign(ref_two_col, gen_start_col = 5)
+
+```
+```{r}
+test %>%
+  filter(scaled_likelihood > 0.85) %>%
+  filter(inferred_collection != collection)
+
+```
+
+```{r}
+# 90% threshold
+74/85
+
+# 85% threshold
+78/91
+```
+
+Ok, so the assignment with rubias actually isn't that terrible... the PCA really doesn't do it justice. Plus, this is with so few loci. Hopefully we can recover some additional variation??
+
+
+Take a quick look to see how the mixture analysis does...
+
+
+
+
+### Mixture assignment
+
+
+Format everything together to avoid issues
+```{r}
+# format for rubias
+all_cols <- alle_idxs %>%
+  left_join(., metadata, by = c("indiv" = "sample")) %>%
+  select(-Sample_ID, -Sample_Plate, -Sample_Well, -allele) %>%
+  filter(!population %in% c("NTC")) %>%
+  select(population, everything()) %>%
+  rename(collection = population)
+
+# make two-col format
+two_cols <- all_cols %>%
+  unite("loc", 3:4, sep = ".") %>%
+  pivot_wider(names_from = loc, values_from = alleidx) %>%
+  mutate(sample_type = ifelse(collection == "bycatch", "mixture", "reference")) %>%
+  mutate(repunit = ifelse(collection == "bycatch", NA, collection)) %>%
+  #mutate(collection = ifelse(collection == "bycatch", NA, collection)) %>%
+  select(sample_type, repunit, collection, everything())
+
+# then make two data frames from that:
+
+mix <- two_cols %>%
+  filter(sample_type == "mixture")
+
+ref <- two_cols %>%
+  filter(sample_type == "reference")
+
+```
+
+
+```{r}
+# run mixture assignment with rubias
+mix_assign <- infer_mixture(reference = ref, mixture = mix, gen_start_col = 5, method = "MCMC", reps = 2000, burn_in = 100)
+
+```
+
+
+One key caveat here is that the repunits should probably be reformulated to reflect the biological divisions (e.g., some of these pops are genetically very very similar)
+
+```{r}
+mix_assign$indiv_posteriors %>%
+  filter(PofZ > 0.9) %>%
+  ggplot() +
+  geom_bar(aes(x = collection), stat = "count")
+
+```
+
+```{r}
+alle_idxs %>%
+  select(locus, allele, alleidx) %>%
+  unique()
+```
+165 alleles in 45 loci.
+
+```{r}
+alle_idxs %>%
+  select(locus) %>%
+  unique()
+
+```
+
+
+## Next steps
+
+
+Okay. The locus drop-out is not awesome, but I'll keep investigating that in the coming days. In the meantime, I'll have Claire run the rest of the albatross bycatch samples using a panel that has just the 2 crazy overamplifiers plus the one which has horrible multiple haplotype issues removed.
+
+
+Make that output file:
+```{r}
+# concentrations from test 5
+prior <- read_csv("csv_outputs/BFALgtseq_test5_primer_cherrypick.csv")
+```
+
+```{r}
+test6$Locus <- gsub("BFAL_", "", test6$Locus)
+
+
+cherrypick6 <- test6 %>%
+  left_join(., prior) %>%
+  mutate(`Destination Plate` = "BFALgtseq_test6") %>%
+  select(`Plate Name`, `Well Position`, Locus, `Destination Plate`, `Destination Well`, new_ul) %>%
+  rename(`Source Plate` = `Plate Name`, `Source Well` = `Well Position`, Volume = new_ul)
+
+
+```
+
+```{r}
+cherrypick6 %>%
+  filter(Volume > 0.5) %>%
+  write_csv("csv_outputs/BFALgtseq6_cherrypick.csv")
+```
+
+
+## PCA
+
+
+
