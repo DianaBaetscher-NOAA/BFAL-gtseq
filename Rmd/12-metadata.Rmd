@@ -31,21 +31,23 @@ samplesheets <- data.frame()
 # read in sample sheets
 for (i in 1:length(file_list)){
   temp_data <- read_csv(paste0("../data/samplesheets/",file_list[i]), skip = 19) #read in files using the fread function from the data.table package
-  samplesheets <- rbindlist(list(dataset, temp_data), use.names = T) #for each iteration, bind the new data to the building dataset
+  samplesheets <- rbindlist(list(samplesheets, temp_data), use.names = T) #for each iteration, bind the new data to the building dataset
 }
 
 samplesheets1 <- samplesheets %>%
-  rename(id = s_number, gtseq_run = Description)
+  rename(id = s_number, gtseq_run = Description) 
+
+
+
+samplesheets1$Sample_ID <- gsub("_", "-", samplesheets1$Sample_ID)
+samplesheets1$Sample_ID <- gsub("banded", "", samplesheets1$Sample_ID)
+
+samplesheets1 <- samplesheets1 %>%  # one ID to fix based on Claire's description of mislabeling
+  mutate(Sample_ID = ifelse(Sample_ID == "08-1144", "08-1844", Sample_ID))
+  
 ```
 
 Importantly, I need the plate/gtseq run and the s_number as unique identifiers.
-
-```{r}
-# read in genotypes
-genos <- read_rds("../data/processed/called_genos.rds")
-
-head(genos)
-```
 
 
 ```{r}
@@ -76,10 +78,23 @@ meta_w_samplesheet %>%
 ```{r}
 # Are we missing any samples from the metadata - things that we didn't genotype, e.g.
 meta_w_samplesheet %>%
-  filter(is.na(gtseq_run)) %>%
-  write_csv("csv_outputs/missing_samples.csv")
+  filter(is.na(gtseq_run))
 
 ```
-Hmmm, a bunch. Like 99, specifically. We'll have to double-check that those made it here and are in Claire's office.
+We'll have to double-check that those made it here and are in Claire's office.
 
+
+Are there genotypes that have no metadata accounted for?
+
+```{r}
+# samplesheet vs. metadata
+samplesheets1 %>%
+  anti_join(., meta, by = c("Sample_ID" = "MWVCRC#")) %>%
+  filter(Sample_Plate != "BFAL002", Sample_Plate != "RockfishPlate13", !str_detect(Sample_ID, "NTC"), !str_detect(Sample_ID, "blank")) %>%
+  write_csv("csv_outputs/genotypes_wo_metadata.csv")
+
+
+meta %>%
+  filter(str_detect(`MWVCRC#`, "banded"))
+```
 
