@@ -209,7 +209,9 @@ ref_two_col <- reference %>%
   pivot_wider(names_from = loc, values_from = alleidx) %>%
   mutate(repunit = collection) %>%
   mutate(sample_type = "reference") %>%
-  select(sample_type, repunit, collection, everything())
+  select(sample_type, repunit, collection, everything()) %>% # modify repunit info for Whale-Skate and Tern, which should be a single repunit for the French Frigate Shoals
+  mutate(repunit = ifelse(collection %in% c("Tern", "Whale-Skate"), "FFS", repunit))
+  
 
 ```
 
@@ -233,14 +235,19 @@ top_assign %>% # top assignment for each sample
 Looks like below 90% would be a reasonable cut-off?
 
 ```{r}
+# total misassignments:
 top_assign %>%
-  filter(repunit != inferred_collection, 
+  filter(repunit != inferred_repunit)
+
+# how many misassignments at the 90% cut-off?
+top_assign %>%
+  filter(repunit != inferred_repunit, 
          scaled_likelihood > 0.9) %>%
   ggplot(aes(x = scaled_likelihood)) +
   geom_histogram()
 
 ```
-10 mis-assignments, but only 4 with a scaled-likelihood > 0.9 and all of those are within the Hawaiian colonies.
+11 mis-assignments, but only 6 with a scaled-likelihood > 0.9 and all of those are within the Hawaiian colonies.
 
 Pretty good!
 
@@ -249,13 +256,13 @@ So overall:
 ```{r}
 top_assign %>%
   filter(scaled_likelihood > 0.9 &
-         collection == inferred_collection)
+         repunit == inferred_repunit)
 ```
 129 samples in the reference baseline (10 dropped out bec of missing data).
 
-90% of samples correctly assigned at 90% scaled likelihood.
+86% of samples correctly assigned at 90% scaled likelihood.
 ```{r}
-117/129
+111/129
 ```
 If we only look at samples that were assigned at > 90% threshold:
 ```{r}
@@ -263,9 +270,9 @@ top_assign %>%
   filter(scaled_likelihood > 0.9)
 ```
 ```{r}
-117/121
+111/117
 ```
-Which would be 97% accurate assignment.
+Which would be 95% accurate assignment.
 
 Quick look at z-scores:
 
@@ -339,7 +346,7 @@ mix_assigned %>%
   geom_histogram()
 
 ```
-845 bycatch samples, most of which are assigned at high probability.
+848 bycatch samples, most of which are assigned at high probability.
 
 
 ```{r}

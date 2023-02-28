@@ -5,10 +5,7 @@ output: html_notebook
 
 24 February 2023
 
-
 This relies on the locus evaluation in `10-locus-summary-and-eval.Rmd` and the initial analysis in `09-reference-baseline-mixture-analysis.Rmd`.
-
-
 
 Implementing the functions for reading in genos from the rds files created by microhaplot.
 
@@ -18,9 +15,7 @@ The R function uses a minimum read depth of 10 reads for the first allele and 6 
 
 The VCF file used to generate these rds files is `BFAL_reference_filtered.vcf`, currently on Sedna. I might return to this by merging additional samples into that VCF file, but those would be bycatch - not reference samples - and the benefit to doing so is uncertain.
 
-
 Read in the `loci_to_toss_hwe.csv` file and then everything should be straightforward and ported from the prior analysis.
-
 
 ```{r load-libraries}
 library(tidyverse)
@@ -46,6 +41,7 @@ I need to vet both the loci and the individuals for missing data, etc.
 ## Locus evaluation
 
 How many loci and how many alleles?
+
 ```{r}
 # alleles
 genos_long %>%
@@ -64,9 +60,11 @@ genos_long %>%
 
   
 ```
+
 469 alleles across 185 loci with between 1-8 alleles per locus.
 
 Missing data:
+
 ```{r}
 # missing data across loci
 locs_to_toss <- genos_long %>%
@@ -81,6 +79,7 @@ genos_locs_filtered <- genos_long %>%
   anti_join(., locs_to_toss)
 
 ```
+
 ```{r}
 # summary of remaining loci
 genos_locs_filtered %>%
@@ -97,12 +96,12 @@ genos_locs_filtered %>%
   arrange(desc(n))
 
 ```
-383 alleles in 154 loci with 1-8 alleles per locus.
 
+383 alleles in 154 loci with 1-8 alleles per locus.
 
 I think a lot of this was dealt with in the `10-locus-summary...` file.
 
-First, look at the loci for missingness and >2 haplotypes in an individual [This might be masked by the function that reads in the rds file??]
+First, look at the loci for missingness and \>2 haplotypes in an individual [This might be masked by the function that reads in the rds file??]
 
 ```{r}
 genos_long %>%
@@ -112,11 +111,9 @@ genos_long %>%
 
 ```
 
-
 ## Missing data in individuals
 
-Total number of loci = 154
-Total number of gene copies = 308
+Total number of loci = 154 Total number of gene copies = 308
 
 Total number of samples = 1,055
 
@@ -133,6 +130,7 @@ genos_locs_ind_filtered <- genos_locs_filtered %>%
   anti_join(., inds_to_toss)
 
 ```
+
 There's a lot of missing data, unfortunately. We might use a higher threshold for missing data for loci to retain more individuals if possible.
 
 25% missing data threshold = 977 inds to keep.
@@ -140,7 +138,9 @@ There's a lot of missing data, unfortunately. We might use a higher threshold fo
 ```{r}
 977/1055
 ```
+
 Take a look at that dataset
+
 ```{r}
 genos_locs_ind_filtered  %>%
   unite(gtseq_run, id, col = "sample", remove = F) %>%
@@ -149,7 +149,7 @@ genos_locs_ind_filtered  %>%
 
 ```
 
-## self-assignment 
+## self-assignment
 
 Doing a sanity check with the reference baseline
 
@@ -164,8 +164,8 @@ alle_idxs <- genos_locs_ind_filtered %>%
 
 ```
 
-
 Add population information from metadata:
+
 ```{r}
 # metadata for reference samples
 meta1 <- readxl::read_xlsx("../data/BFAL_WGS_01_finalPlateMap.xlsx", sheet = "combinedPlate1And2SamplePops")
@@ -201,8 +201,6 @@ alle_idxs %>%
 
 ```
 
-
-
 ```{r}
 # format for rubias
 reference <- alle_idxs %>%
@@ -217,10 +215,10 @@ ref_two_col <- reference %>%
   pivot_wider(names_from = loc, values_from = alleidx) %>%
   mutate(repunit = collection) %>%
   mutate(sample_type = "reference") %>%
-  select(sample_type, repunit, collection, everything())
+  select(sample_type, repunit, collection, everything()) %>% # modify repunit info for Whale-Skate and Tern, which should be a single repunit for the French Frigate Shoals
+  mutate(repunit = ifelse(collection %in% c("Tern", "Whale-Skate"), "FFS", repunit))
 
 ```
-
 
 ```{r}
 # self-assignment
@@ -238,40 +236,52 @@ top_assign %>% # top assignment for each sample
   geom_histogram()
 
 ```
+
 Looks like below 90% would be a reasonable cut-off?
 
 ```{r}
 top_assign %>%
-  filter(repunit != inferred_collection, 
+  filter(repunit != inferred_repunit, 
          scaled_likelihood > 0.9)
 
 ```
-11 mis-assignments, but only 6 with a scaled-likelihood > 0.9 and two are Lehua, which only has two individuals in the baseline. 
 
-Pretty good!
+11 mis-assignments, but only 6 with a scaled-likelihood > 0.9 and two are Lehua, which only has two individuals in the baseline, so probably not great representation for that colony. Maybe also suggesting that the Lehua colony was formed by birds from Midway...?
+
 
 So overall:
 
 ```{r}
+# correct assignment with no likelihood threshold?
+top_assign %>%
+  filter(repunit == inferred_repunit)
+118/129
+
 top_assign %>%
   filter(scaled_likelihood > 0.9 &
-         collection == inferred_collection)
+         repunit == inferred_repunit)
 ```
+
 129 samples in the reference baseline (10 dropped out bec of missing data).
 
 90% of samples correctly assigned at 90% scaled likelihood.
+
 ```{r}
 111/129
 ```
-If we only look at samples that were assigned at > 90% threshold:
+
+If we only look at samples that were assigned at \> 90% threshold:
+
 ```{r}
 top_assign %>%
   filter(scaled_likelihood > 0.9,
          collection == inferred_collection)
 ```
+
 ```{r}
 111/117
 ```
+
 Which would be 95% accurate assignment.
 
 Quick look at z-scores:
@@ -283,6 +293,7 @@ top_assign %>%
 
 
 ```
+
 Woah. There's an outlier.
 
 ```{r}
@@ -290,11 +301,10 @@ top_assign %>%
   filter(z_score < -3)
 
 ```
+
 Maybe a different species accidentally? I can double-check the sample number with metadata that Jessie sent. Other than that, things are looking good to proceed with mixture assignment.
 
-
 ## Mixture bycatch assignment
-
 
 ```{r}
 # get the format right
@@ -326,7 +336,6 @@ ref <- tmp %>%
   filter(sample_type == "reference")
 ```
 
-
 ```{r}
 # mixture analysis
 bycatch_assign <- rubias::infer_mixture(reference = ref, mixture = mix, gen_start_col = 5)
@@ -334,6 +343,7 @@ bycatch_assign <- rubias::infer_mixture(reference = ref, mixture = mix, gen_star
 ```
 
 Bycatch results for mixture
+
 ```{r}
 mix_assigned <- bycatch_assign$indiv_posteriors %>%
   group_by(indiv) %>%
@@ -346,8 +356,8 @@ mix_assigned %>%
   geom_histogram()
 
 ```
-845 bycatch samples, most of which are assigned at high probability.
 
+848 bycatch samples, most of which are assigned at high probability.
 
 ```{r}
 mix_assigned %>%
@@ -358,12 +368,94 @@ mix_assigned %>%
 This is where there's an interesting trade-off between dropping individuals from the analysis vs. entertaining the possibility of incorrect assignments. We can explore this further by looking at different thresholds in the self-assignment. We can also combine Whale-Skate and Tern into a single FFS reporting unit and maybe remove Lehua if it has too little data...
 
 Quick summary for 90% likelihood
+
 ```{r}
 mix_assigned %>%
   filter(PofZ > 0.9) %>%
-  group_by(collection) %>%
+  group_by(repunit) %>%
   tally()
 
 ```
+
+```{r}
+# how many samples are assigned to which reporting unit at what PofZ?
+mix_assigned %>%
+  ggplot(aes(x = PofZ, y = repunit)) +
+  geom_point()
+
+```
+Filter for z-scores:
+```{r}
+
+mix_assigned %>%
+  ggplot(aes(x = z_score)) +
+  geom_histogram() 
+
+```
+There are some serious outliers and then some less significant outliers. Take a closer look:
+
+```{r}
+# z-score outliers
+mix_assigned %>%
+  filter(z_score < 5) %>%
+  ggplot(aes(x = z_score)) +
+  geom_histogram() 
+
+```
+The normal distribution looks asymmetrical: +2.5 on the right and -4 on the left...
+
+
+
+```{r}
+# z-score outliers
+mix_assigned %>%
+  filter(z_score > 3)
+```
+
+Interesting. So the Lehua assignments have the crazy z-scores. But we also had very few baseline samples for Lehua. Not a lot of confidence in those assignments.
+
+The Laysan assignments that are between 3-4 z-scores could just be enough different because we only had 8 Laysan baseline samples? 
+
+I'm also curious to what extent timing (and date of baseline samples) plays a role here.
+
+```{r}
+mix_assigned %>%
+  filter(z_score < -4)
+
+```
+
+A fair number of z-score outliers:
+28 total.
+
+
+Let's remove them for now and then assess the remaining bycatch samples/assignment results:
+```{r}
+# remove outliers
+assigned_z_removed <- mix_assigned %>%
+  filter(z_score > -3 & z_score < 3) 
+
+assigned_z_removed %>%
+  ggplot(aes(x = PofZ, y = repunit, color = collection)) +
+  geom_jitter() +
+  theme_minimal()
+
+```
+820 samples
+
+
+Thinking about how to do some type of accumulation curve? How many samples are included at what level of confidence?
+
+```{r}
+assigned_z_removed %>%
+  filter(PofZ > 0.9) %>%
+  group_by(repunit) %>%
+  tally()
+```
+
+x = PofZ
+y = number of samples
+color = reporting unit
+
+Basically, I want to visualize the trade-off between type I and type II error.
 
 

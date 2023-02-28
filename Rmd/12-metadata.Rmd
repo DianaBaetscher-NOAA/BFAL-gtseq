@@ -1,0 +1,85 @@
+---
+title: "metadata"
+output: html_notebook
+---
+
+27 February 2023
+
+
+Organizing the metadata - linking the MiSeq run sample sheet to the Oikonos metadata and then the genotypes.
+
+
+```{r}
+library(tidyverse)
+library(data.table)
+
+# read in metadata from Oikonos
+meta <- read_csv("../data/metadata/Oikonos_BFAL_Metadata_12.21.2022.csv") %>%
+  select(-c(20:27))
+
+```
+
+
+
+```{r}
+#create a list of the files from your target directory
+file_list <- list.files(path="../data/samplesheets/")
+
+#initiate a blank data frame, each iteration of the loop will append the data from the given file to this variable
+samplesheets <- data.frame()
+
+# read in sample sheets
+for (i in 1:length(file_list)){
+  temp_data <- read_csv(paste0("../data/samplesheets/",file_list[i]), skip = 19) #read in files using the fread function from the data.table package
+  samplesheets <- rbindlist(list(dataset, temp_data), use.names = T) #for each iteration, bind the new data to the building dataset
+}
+
+samplesheets1 <- samplesheets %>%
+  rename(id = s_number, gtseq_run = Description)
+```
+
+Importantly, I need the plate/gtseq run and the s_number as unique identifiers.
+
+```{r}
+# read in genotypes
+genos <- read_rds("../data/processed/called_genos.rds")
+
+head(genos)
+```
+
+
+```{r}
+# merge sample id with genotype data
+# tmp_genos <- genos %>%
+#   left_join(., samplesheets1, by = c("gtseq_run", "id")) %>%
+#   select(Sample_ID, gtseq_run, id, locus, gene_copy, allele, depth, allele.balance)
+# 
+# tmp_genos$Sample_ID <- gsub("BFAL", "", tmp_genos$Sample_ID)
+
+```
+
+
+
+But what I actually need is a link between the metadata and the samplesheet
+```{r}
+samplesheets1$Sample_ID <- gsub("BFAL", "", samplesheets1$Sample_ID)
+
+meta_w_samplesheet <- meta %>%
+  left_join(., samplesheets1, by = c("MWVCRC#" = "Sample_ID"))
+
+meta_w_samplesheet %>%
+  write_csv("../data/processed/metadata_w_samplesheet.csv")
+
+```
+
+
+```{r}
+# Are we missing any samples from the metadata - things that we didn't genotype, e.g.
+meta_w_samplesheet %>%
+  filter(is.na(gtseq_run)) %>%
+  write_csv("csv_outputs/missing_samples.csv")
+
+```
+Hmmm, a bunch. Like 99, specifically. We'll have to double-check that those made it here and are in Claire's office.
+
+
