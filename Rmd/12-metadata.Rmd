@@ -42,8 +42,8 @@ samplesheets1 <- samplesheets %>%
 samplesheets1$Sample_ID <- gsub("_", "-", samplesheets1$Sample_ID)
 samplesheets1$Sample_ID <- gsub("banded", "", samplesheets1$Sample_ID)
 
-samplesheets1 <- samplesheets1 %>%  # one ID to fix based on Claire's description of mislabeling
-  mutate(Sample_ID = ifelse(Sample_ID == "08-1144", "08-1844", Sample_ID))
+samplesheets2 <- samplesheets1 %>%  # one ID to fix based on Claire's description of mislabeling
+  mutate(Sample_ID = ifelse(Sample_ID == "BFAL08-1144", "BFAL08-1844", Sample_ID))
   
 ```
 
@@ -64,10 +64,10 @@ Importantly, I need the plate/gtseq run and the s_number as unique identifiers.
 
 But what I actually need is a link between the metadata and the samplesheet
 ```{r}
-samplesheets1$Sample_ID <- gsub("BFAL", "", samplesheets1$Sample_ID)
+samplesheets2$Sample_ID <- gsub("BFAL", "", samplesheets2$Sample_ID)
 
 meta_w_samplesheet <- meta %>%
-  left_join(., samplesheets1, by = c("MWVCRC#" = "Sample_ID"))
+  left_join(., samplesheets2, by = c("MWVCRC#" = "Sample_ID"))
 
 meta_w_samplesheet %>%
   write_csv("../data/processed/metadata_w_samplesheet.csv")
@@ -88,7 +88,7 @@ Are there genotypes that have no metadata accounted for?
 
 ```{r}
 # samplesheet vs. metadata
-samplesheets1 %>%
+samplesheets2 %>%
   anti_join(., meta, by = c("Sample_ID" = "MWVCRC#")) %>%
   filter(Sample_Plate != "BFAL002", Sample_Plate != "RockfishPlate13", !str_detect(Sample_ID, "NTC"), !str_detect(Sample_ID, "blank")) %>%
   write_csv("csv_outputs/genotypes_wo_metadata.csv")
@@ -96,5 +96,6 @@ samplesheets1 %>%
 
 meta %>%
   filter(str_detect(`MWVCRC#`, "banded"))
+
 ```
 

@@ -180,9 +180,13 @@ metadata <- samplelist %>%
   mutate(population = ifelse(is.na(population), "bycatch", population)) %>%
   select(-pop)
 
+# metadata for Lehua
+lehua <- metadata %>%
+  filter(population == "Lehua")
+
 # just reference samples
 ref_samples <- metadata %>%
-  filter(!population %in% c("bycatch","NTC")) %>%
+  filter(!population %in% c("bycatch","NTC", "Lehua")) %>% # remove the 2 Lehua samples from the baseline
   select(Sample_ID, gtseq_run, id, population) %>%
   left_join(., genos_locs_ind_filtered, by = c("gtseq_run", "id"))
   
@@ -220,6 +224,15 @@ ref_two_col <- reference %>%
 
 ```
 
+### Self-assignment of colony samples
+
+```{r}
+ref_two_col %>%
+  group_by(collection) %>%
+  tally()
+```
+
+
 ```{r}
 # self-assignment
 baseline_assign <- rubias::self_assign(ref_two_col, gen_start_col = 5)
@@ -246,7 +259,7 @@ top_assign %>%
 
 ```
 
-11 mis-assignments, but only 6 with a scaled-likelihood > 0.9 and two are Lehua, which only has two individuals in the baseline, so probably not great representation for that colony. Maybe also suggesting that the Lehua colony was formed by birds from Midway...?
+9 mis-assignments, but only 6 with a scaled-likelihood > 0.9 and two are Lehua, which only has two individuals in the baseline, so probably not great representation for that colony. Maybe also suggesting that the Lehua colony was formed by birds from Midway...?
 
 
 So overall:
@@ -255,19 +268,19 @@ So overall:
 # correct assignment with no likelihood threshold?
 top_assign %>%
   filter(repunit == inferred_repunit)
-118/129
+118/127
 
 top_assign %>%
   filter(scaled_likelihood > 0.9 &
          repunit == inferred_repunit)
 ```
 
-129 samples in the reference baseline (10 dropped out bec of missing data).
+127 samples in the reference baseline (10 dropped out bec of missing data).
 
-90% of samples correctly assigned at 90% scaled likelihood.
+93% of samples correctly assigned at 90% scaled likelihood.
 
 ```{r}
-111/129
+111/127
 ```
 
 If we only look at samples that were assigned at \> 90% threshold:
@@ -279,10 +292,10 @@ top_assign %>%
 ```
 
 ```{r}
-111/117
+111/115
 ```
 
-Which would be 95% accurate assignment.
+Which would be 96.5% accurate assignment.
 
 Quick look at z-scores:
 
@@ -304,12 +317,18 @@ top_assign %>%
 
 Maybe a different species accidentally? I can double-check the sample number with metadata that Jessie sent. Other than that, things are looking good to proceed with mixture assignment.
 
+Also, Jessie mentioned hybrids between Laysan and BFAL...
+
+
+
 ## Mixture bycatch assignment
+
 
 ```{r}
 # get the format right
 mix_two_col <- alle_idxs %>%
   anti_join(., ref_pops) %>%
+  anti_join(., lehua) %>%
   unite(gtseq_run, id, col = "indiv", sep = "_") %>%
   select(-allele) %>%
   unite("loc", 2:3, sep = ".") %>%
@@ -386,7 +405,6 @@ mix_assigned %>%
 ```
 Filter for z-scores:
 ```{r}
-
 mix_assigned %>%
   ggplot(aes(x = z_score)) +
   geom_histogram() 
@@ -418,6 +436,9 @@ The Laysan assignments that are between 3-4 z-scores could just be enough differ
 
 I'm also curious to what extent timing (and date of baseline samples) plays a role here.
 
+We didn't have Pearl and Hermes - closer to Laysan - some of these bycatch could be from this colony, which has 1000s of birds, bigger than Laysan.
+
+
 ```{r}
 mix_assigned %>%
   filter(z_score < -4)
@@ -425,7 +446,7 @@ mix_assigned %>%
 ```
 
 A fair number of z-score outliers:
-28 total.
+26 total.
 
 
 Let's remove them for now and then assess the remaining bycatch samples/assignment results:
@@ -440,7 +461,7 @@ assigned_z_removed %>%
   theme_minimal()
 
 ```
-820 samples
+822 samples
 
 
 Thinking about how to do some type of accumulation curve? How many samples are included at what level of confidence?
@@ -457,5 +478,46 @@ y = number of samples
 color = reporting unit
 
 Basically, I want to visualize the trade-off between type I and type II error.
+
+
+## Add bycatch metadata
+
+
+```{r}
+metadata_ss <- read_csv("../data/processed/metadata_w_samplesheet.csv")
+```
+```{r}
+tmp.samp
+```
+
+Generate a full dataset to share with Jessie...
+```{r}
+# just the reference sample birds that were from Jessie's collections
+tmp.samp <- top_assign %>%
+  filter(!str_detect(indiv, "TOR")) %>%
+    filter(!str_detect(indiv, "KURE")) %>%
+      filter(!str_detect(indiv, "PCMB")) %>%
+  select(-missing_loci)
+
+tmp.samp$indiv <- gsub("BFAL", "", tmp.samp$indiv)
+tmp.samp
+           
+
+bycatch_w_meta <- metadata_ss %>% 
+  unite(col = "indiv", gtseq_run, id, sep = "_") %>%
+  left_join(., assigned_z_removed) %>%
+  select(-missing_loci)
+
+bycatch_w_meta %>%
+    write_csv("../data/processed/bycatch_assignments_w_metadata.csv")
+
+
+# reference data
+tmp.samp %>%
+  left_join(., metadata_ss, by = c("indiv" = "MWVCRC#")) %>%
+  write_csv("../data/processed/reference_banded_assignments_w_metadata.csv")
+```
+130 samples without probability of assignment - some of those are likely (possibly banded birds that were used as reference).
+
 
 
