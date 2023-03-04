@@ -207,21 +207,22 @@ saveRDS(genos_long, file = "data/processed/called_genos.rds", compress = "xz")
 # #meta <- readRDS("data/processed/meta-data-tibble.rds")
 # #sample_sheets <- readRDS("data/processed/sample-sheet-tibble.rds")
 # 
-# #### In the end, let us get a data frame that includes genotypes for all the individuals  ####
-# # and which explicitly has NAs in places where data are missing, and also 
-# # has the NMFS_DNA_ID on there
-# genos_long_explicit_NAs <- sample_sheets %>%
-#   select(gtseq_run, id, NMFS_DNA_ID) %>%
-#   unite(col = gid, sep = "_", gtseq_run, id, NMFS_DNA_ID) %>%
-#   select(gid) %>%
-#   unlist() %>%
-#   unname() %>%
-#   expand.grid(gid = ., locus = unique(genos_long$locus), gene_copy = 1:2, stringsAsFactors = FALSE) %>%
-#   tbl_df() %>% 
-#   separate(gid, into = c("gtseq_run", "id", "NMFS_DNA_ID"), convert = TRUE) %>%
-#   left_join(., genos_long) %>%
-#   arrange(gtseq_run, id, locus, gene_copy)
-# 
-# # and then save that
-# saveRDS(genos_long_explicit_NAs, file = "new_baseline_data/processed/called_genos_na_explicit.rds", compress = "xz")
-#   
+#### In the end, let us get a data frame that includes genotypes for all the individuals  ####
+# and which explicitly has NAs in places where data are missing
+
+genos_long_explicit_NAs <- genos_long %>%
+  select(gtseq_run, id) %>%
+  unique() %>%
+  unite(col = gid, sep = "_", gtseq_run, id) %>%
+  select(gid) %>%
+  unlist() %>%
+  unname() %>%
+  expand.grid(gid = ., locus = unique(genos_long$locus), gene_copy = 1:2, stringsAsFactors = FALSE) %>%
+  tbl_df() %>%
+  separate(gid, into = c("gtseq_run", "id"), convert = TRUE) %>%
+  left_join(., genos_long) %>%
+  arrange(gtseq_run, id, locus, gene_copy)
+
+# and then save that
+saveRDS(genos_long_explicit_NAs, file = "data/processed/called_genos_na_explicit.rds", compress = "xz")
+

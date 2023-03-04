@@ -17,6 +17,7 @@ The VCF file used to generate these rds files is `BFAL_reference_filtered.vcf`, 
 
 Read in the `loci_to_toss_hwe.csv` file and then everything should be straightforward and ported from the prior analysis.
 
+
 ```{r load-libraries}
 library(tidyverse)
 library(readxl)
@@ -24,17 +25,175 @@ library(stringr)
 library(lubridate)
 ```
 
+
 ```{r}
 # remove the loci that had deviations from HWE in the majority of populations
 loci_to_toss_hwe <- read_csv("csv_outputs/loci_to_toss_hwe.csv")
 
 # read in rds file with genotypes
-genos_long <- read_rds("../data/processed/called_genos.rds") %>%
+genos_long <- read_rds("../data/processed/called_genos_na_explicit.rds") %>%
   anti_join(., loci_to_toss_hwe)
   
-
-head(genos_long)
 ```
+
+Add metadata
+```{r}
+# metadata for bycatch
+# from Rmd 12-metadata
+meta_w_ss <-  read_csv("../data/processed/metadata_w_samplesheet.csv")
+
+meta_ids <- meta_w_ss %>%
+  select(gtseq_run, id, `MWVCRC#`) %>%
+  rename(sampleID = `MWVCRC#`) %>%
+  mutate(population = NA) %>%
+  select(sampleID, everything())
+
+
+# metadata for reference samples used for lcWGS
+meta1 <- readxl::read_xlsx("../data/BFAL_WGS_01_finalPlateMap.xlsx", sheet = "combinedPlate1And2SamplePops")
+
+# from the MiSeq sample sheet
+samplelist <- read_csv("../data/gtseq5_samplelist.csv") %>%
+  mutate(gtseq_run = "gtseq5") %>%
+  rename(id = sample)
+
+# combine samplesheet and reference sample info
+metadata <- samplelist %>%
+  left_join(., meta1, by = c("Sample_ID" = "ind_ID")) %>%
+  mutate(population = ifelse(!is.na(pop), pop, population)) %>%
+  mutate(population = ifelse(is.na(population), "bycatch", population)) %>%
+  select(-pop)
+
+# change sampleID format
+#metadata$Sample_ID <- gsub("BFAL", "", metadata$Sample_ID)
+
+# metadata for Lehua
+lehua <- metadata %>%
+  filter(population == "Lehua")
+lehua$Sample_ID <- gsub("BFAL", "", lehua$Sample_ID)
+
+
+# just reference samples
+ref_samples <- metadata %>%
+  filter(!population %in% c("bycatch","NTC", "Lehua")) %>% # remove the 2 Lehua samples from the baseline
+  select(Sample_ID, gtseq_run, id, population) %>%
+  rename(sampleID = Sample_ID)
+
+
+# need to fix the ids
+ref_banded_birds <- ref_samples %>%
+    filter(!str_detect(sampleID, "TOR")) %>%
+    filter(!str_detect(sampleID, "KURE")) %>%
+      filter(!str_detect(sampleID, "PCMB"))
+
+ref_banded_birds$sampleID <- gsub("BFAL", "", ref_banded_birds$sampleID)
+
+
+reference_samples <- ref_samples %>%
+  anti_join(., ref_banded_birds, by = c("gtseq_run", "id")) %>%
+  bind_rows(ref_banded_birds)
+
+# 137 samples included in the reference data  
+ref_pops <- reference_samples %>%
+  select(gtseq_run, id, sampleID, population) %>%
+  unique()
+
+```
+
+
+Merge metadata and genotypes
+```{r}
+# merge reference metadata and the rest of the metadata
+non_ref_ids <- meta_ids %>%
+  anti_join(., reference_samples, by = c("sampleID"))
+
+all_samples_w_ids <- bind_rows(reference_samples, non_ref_ids)
+
+# are there duplicates there?
+duplicates <- all_samples_w_ids %>%
+  group_by(sampleID) %>%
+  tally() %>%
+  filter(n>1)
+
+duplicates %>%
+  left_join(., all_samples_w_ids)
+```
+Seems weird that so many were genotyped twice inadvertently.
+
+```{r}
+meta_w_ss %>%
+  filter(str_detect(`MWVCRC#`, "21-0318"))
+```
+Appears to be real... I can double check with Claire about whether that was intentional.
+
+
+```{r}
+genos_w_ids <- genos_long %>%
+  left_join(., all_samples_w_ids, by = c("gtseq_run", "id")) %>%
+  select(sampleID, everything())
+
+```
+Come back to figure out what's going on with the missing sample IDs
+
+
+## Some initial filters
+
+### Take highest read-depth call for multiply-genotyped DNA_IDs
+
+I'm not sure if there are any of these, but best to leave it in here...
+
+Now, here is a harder operation: if an individual is multiply-genotyped, take the
+genotype with the highest total read depth.  
+```{r take-just-one}
+# slow-ish function to get the total read depth column
+tdepth <- function(a, d) {
+  if(any(is.na(a))) {
+    return(NA)
+  }
+  if(a[1]==a[2]) {
+    return(d[1])
+  } else {
+    return(d[1] + d[2])
+  }
+  
+}
+# this takes the highest read-depth instance of each duplicately-genotyped individual.
+geno_one_each <- genos_w_ids %>%
+  group_by(sampleID, locus, gtseq_run) %>%
+  mutate(total_depth = tdepth(allele, depth)) %>%
+  ungroup() %>%
+  arrange(sampleID, locus, total_depth, gtseq_run, depth) %>%
+  group_by(sampleID, locus) %>%
+  mutate(rank = 1:n()) %>% # this ranks all alleles for a given individual by depth
+  ungroup() %>%
+  filter(rank <= 2) # this takes the top ranked alleles and should remove duplicates
+  
+
+# how many samples now?
+geno_one_each %>%
+  group_by(sampleID) %>%
+  select(sampleID, gtseq_run, id) %>%
+  unique() %>%
+  tally() %>%
+  filter(n>1) 
+
+```
+950 unique sampleIDs; 38 samples were genotyped twice.
+
+Because there are multiple gtseq runs/ids for the same individual, I should pivot to using the sampleID as the unique key, and there is only one complete set of alleles for each sampleID.
+
+
+```{r}
+# try using this df to eliminate issues with duplication
+genos_no_dups <- geno_one_each %>%
+  select(-gtseq_run, -id, -total_depth, -rank)
+
+```
+
+
+
+
+
 
 I need to vet both the loci and the individuals for missing data, etc.
 
@@ -44,13 +203,14 @@ How many loci and how many alleles?
 
 ```{r}
 # alleles
-genos_long %>%
+genos_no_dups %>%
   filter(!is.na(allele)) %>%
   select(locus, allele) %>%
-  unique()
+  unique() %>%
+  arrange(locus)
 
 # loci
-genos_long %>%
+genos_no_dups %>%
   filter(!is.na(allele)) %>%
   select(locus, allele) %>%
   unique() %>%
@@ -61,13 +221,13 @@ genos_long %>%
   
 ```
 
-469 alleles across 185 loci with between 1-8 alleles per locus.
+466 alleles across 185 loci with between 1-8 alleles per locus.
 
 Missing data:
 
 ```{r}
 # missing data across loci
-locs_to_toss <- genos_long %>%
+locs_to_toss <- genos_no_dups %>%
   group_by(locus) %>%
   mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
   summarise(sum(missingness)) %>% # 190 loci x2 = total
@@ -75,7 +235,7 @@ locs_to_toss <- genos_long %>%
   select(locus) # drop those loci for now and see how the assignment goes
 
 # just the keepers
-genos_locs_filtered <- genos_long %>%
+genos_locs_filtered <- genos_no_dups %>%
   anti_join(., locs_to_toss)
 
 ```
@@ -97,15 +257,15 @@ genos_locs_filtered %>%
 
 ```
 
-383 alleles in 154 loci with 1-8 alleles per locus.
+396 alleles in 161 loci with 1-8 alleles per locus.
 
 I think a lot of this was dealt with in the `10-locus-summary...` file.
 
 First, look at the loci for missingness and \>2 haplotypes in an individual [This might be masked by the function that reads in the rds file??]
 
 ```{r}
-genos_long %>%
-  group_by(gtseq_run, id, locus) %>% # there should be no more than 2 alleles for a given indiv/locus
+genos_no_dups %>%
+  group_by(sampleID, locus) %>% # there should be no more than 2 alleles for a given indiv/locus
   tally() %>%
   filter(n > 2)
 
@@ -113,17 +273,17 @@ genos_long %>%
 
 ## Missing data in individuals
 
-Total number of loci = 154 Total number of gene copies = 308
+Total number of loci = 161 Total number of gene copies = 322
 
-Total number of samples = 1,055
+Total number of samples = 950
 
 ```{r}
 inds_to_toss <- genos_locs_filtered %>%
-  group_by(gtseq_run, id) %>%
+  group_by(sampleID) %>%
   mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
   summarise(sum(missingness)) %>%
   arrange(desc(`sum(missingness)`)) %>%
-  filter(`sum(missingness)` > 77) # remove samples with >25% missing data
+  filter(`sum(missingness)` > 81) # remove samples with >25% missing data
 
 # just the keepers
 genos_locs_ind_filtered <- genos_locs_filtered %>%
@@ -133,18 +293,17 @@ genos_locs_ind_filtered <- genos_locs_filtered %>%
 
 There's a lot of missing data, unfortunately. We might use a higher threshold for missing data for loci to retain more individuals if possible.
 
-25% missing data threshold = 977 inds to keep.
+25% missing data threshold = drop 61 indivs; keep 889.
 
 ```{r}
-977/1055
+889/950
 ```
 
 Take a look at that dataset
 
 ```{r}
 genos_locs_ind_filtered  %>%
-  unite(gtseq_run, id, col = "sample", remove = F) %>%
-  ggplot(aes(x = reorder(locus, depth), y = reorder(sample, depth), fill = log10(depth))) +
+  ggplot(aes(x = reorder(locus, depth), y = reorder(sampleID, depth), fill = log10(depth))) +
   geom_tile()
 
 ```
@@ -156,52 +315,27 @@ Doing a sanity check with the reference baseline
 ```{r}
 # first make integers of the alleles
 alle_idxs <- genos_locs_ind_filtered %>% 
-  dplyr::select(gtseq_run, id, locus, gene_copy, allele) %>%
+  dplyr::select(sampleID, locus, gene_copy, allele) %>%
   group_by(locus) %>%
   mutate(alleidx = as.integer(factor(allele, levels = unique(allele)))) %>%
   ungroup() %>%
-  arrange(gtseq_run, id, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
+  arrange(sampleID, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
 
 ```
 
-Add population information from metadata:
+
 
 ```{r}
-# metadata for reference samples
-meta1 <- readxl::read_xlsx("../data/BFAL_WGS_01_finalPlateMap.xlsx", sheet = "combinedPlate1And2SamplePops")
-
-samplelist <- read_csv("../data/gtseq5_samplelist.csv") %>%
-  mutate(gtseq_run = "gtseq5") %>%
-  rename(id = sample)
-
-metadata <- samplelist %>%
-  left_join(., meta1, by = c("Sample_ID" = "ind_ID")) %>%
-  mutate(population = ifelse(!is.na(pop), pop, population)) %>%
-  mutate(population = ifelse(is.na(population), "bycatch", population)) %>%
-  select(-pop)
-
-# metadata for Lehua
-lehua <- metadata %>%
-  filter(population == "Lehua")
-
-# just reference samples
-ref_samples <- metadata %>%
-  filter(!population %in% c("bycatch","NTC", "Lehua")) %>% # remove the 2 Lehua samples from the baseline
-  select(Sample_ID, gtseq_run, id, population) %>%
-  left_join(., genos_locs_ind_filtered, by = c("gtseq_run", "id"))
-  
-ref_pops <- ref_samples %>%
-  select(gtseq_run, id, Sample_ID, population) %>%
-  unique()
-```
-
-```{r}
+# get the allele indexes for just the reference populations
 alle_idxs %>%
-  filter(gtseq_run == "gtseq5") %>%
-  select(id) %>%
+  select(sampleID) %>%
   unique() %>%
   inner_join(., ref_pops) %>%
   left_join(., alle_idxs)
+
+alle_idxs %>%
+  group_by(sampleID) %>%
+  tally()
 
 ```
 
@@ -210,8 +344,8 @@ alle_idxs %>%
 reference <- alle_idxs %>%
   inner_join(., ref_pops) %>%
   select(-allele, -gtseq_run, -id) %>%
-  select(population, Sample_ID, everything()) %>%
-  rename(collection = population, indiv = Sample_ID)
+  select(population, sampleID, everything()) %>%
+  rename(collection = population, indiv = sampleID)
 
 # make two-col format
 ref_two_col <- reference %>%
@@ -224,12 +358,20 @@ ref_two_col <- reference %>%
 
 ```
 
+
+
 ### Self-assignment of colony samples
+
+KEY CAVEAT: I cannot assess the success of assignment using the same samples I used to design the loci for the GTseq panel. Therefore, what I will do is use banded birds as a hold-out dataset and the samples from my reference populations as the training dataset.
+
+Another point for consideration is the discrepancy between sample sizes for the colonies. Depending on how the hold-out dataset works, I can revisit downsampling some of the populations to bring them closer together.
+
 
 ```{r}
 ref_two_col %>%
-  group_by(collection) %>%
+  group_by(repunit) %>%
   tally()
+
 ```
 
 
@@ -254,12 +396,15 @@ Looks like below 90% would be a reasonable cut-off?
 
 ```{r}
 top_assign %>%
-  filter(repunit != inferred_repunit, 
+  filter(repunit != inferred_repunit)
+
+top_assign %>%
+  filter(repunit != inferred_repunit,
          scaled_likelihood > 0.9)
 
 ```
 
-9 mis-assignments, but only 6 with a scaled-likelihood > 0.9 and two are Lehua, which only has two individuals in the baseline, so probably not great representation for that colony. Maybe also suggesting that the Lehua colony was formed by birds from Midway...?
+8 mis-assignments, but only 4 with a scaled-likelihood > 0.9.
 
 
 So overall:
@@ -268,7 +413,7 @@ So overall:
 # correct assignment with no likelihood threshold?
 top_assign %>%
   filter(repunit == inferred_repunit)
-118/127
+119/127
 
 top_assign %>%
   filter(scaled_likelihood > 0.9 &
@@ -277,25 +422,19 @@ top_assign %>%
 
 127 samples in the reference baseline (10 dropped out bec of missing data).
 
-93% of samples correctly assigned at 90% scaled likelihood.
+94% of samples correctly assigned at 90% scaled likelihood.
 
 ```{r}
-111/127
+113/127
 ```
 
 If we only look at samples that were assigned at \> 90% threshold:
 
 ```{r}
-top_assign %>%
-  filter(scaled_likelihood > 0.9,
-         collection == inferred_collection)
+113/119
 ```
 
-```{r}
-111/115
-```
-
-Which would be 96.5% accurate assignment.
+Which would be 95% accurate assignment.
 
 Quick look at z-scores:
 
@@ -303,7 +442,6 @@ Quick look at z-scores:
 top_assign %>%
   ggplot(aes(z_score)) +
   geom_histogram()
-
 
 ```
 
@@ -319,17 +457,27 @@ Maybe a different species accidentally? I can double-check the sample number wit
 
 Also, Jessie mentioned hybrids between Laysan and BFAL...
 
+```{r}
+alle_idxs %>%
+  inner_join(., ref_pops) %>%
+  group_by(sampleID) %>%
+  tally() %>%
+  filter(n >322)
+
+```
 
 
-## Mixture bycatch assignment
+
+
+## Hold out dataset
 
 
 ```{r}
 # get the format right
 mix_two_col <- alle_idxs %>%
+  filter(!is.na(sampleID)) %>% # remove any NAs at this stage
   anti_join(., ref_pops) %>%
-  anti_join(., lehua) %>%
-  unite(gtseq_run, id, col = "indiv", sep = "_") %>%
+  anti_join(., lehua, by = c("sampleID" = "Sample_ID")) %>%
   select(-allele) %>%
   unite("loc", 2:3, sep = ".") %>%
   pivot_wider(names_from = loc, values_from = alleidx) %>%
@@ -343,15 +491,134 @@ head(mix_two_col)
 
 ```
 
+Figure out which of those sampleIDs correspond to banded birds for the hold-out dataset
+
 ```{r}
+# get the sample ids for the hold-out data
+banded_ids_locs <- meta_w_ss %>%
+  filter(`BandY/N` == "TRUE") %>%
+  rename(sampleID = `MWVCRC#`) %>%
+  select(sampleID, `Loc-Abbr`) %>%
+  filter(!is.na(`Loc-Abbr`)) %>%
+  anti_join(., reference, by = c("sampleID" = "indiv")) %>%
+  filter(`Loc-Abbr` != "Kauai, Kilauea")
+  
+
+# finalize the formating and location info
+hold_out_2col <- mix_two_col %>%
+  inner_join(., banded_ids_locs) %>%
+  rename(indiv = sampleID) %>%
+  mutate(collection = `Loc-Abbr`) %>%
+  select(-`Loc-Abbr`) %>%
+  group_by(indiv) %>%
+  slice_sample(n = 1) %>%
+  ungroup()
+  
+# confirm there are no duplicate sample ids
+hold_out_2col %>%
+  group_by(indiv) %>%
+  tally() %>%
+  filter(n >1) %>%
+  left_join(., hold_out_2col)
+
 # for whatever reason, rubias is being finicky about the format and it's easiest to do this
 # to make sure both df are consistent
-tmp <- bind_rows(ref_two_col, mix_two_col)
+tmp <- bind_rows(ref_two_col, hold_out_2col)
 
-mix <- tmp %>%
+mix_holdout <- tmp %>%
   filter(sample_type == "mixture")
 
 ref <- tmp %>%
+  filter(sample_type == "reference")
+```
+759 samples in this mixture dataframe
+174 banded birds with location information
+
+66 banded birds in the hold out dataset.
+
+
+
+```{r}
+# mixture analysis for the hold out dataset
+holdout_assigned <- rubias::infer_mixture(reference = ref, mixture = mix_holdout, gen_start_col = 5)
+
+
+```
+### Results from holdout dataset
+
+```{r}
+# mixing proportions for all results
+holdout_assigned$mixing_proportions %>%
+  group_by(mixture_collection, repunit) %>%
+  summarise(sum_pi = sum(pi)) %>%
+  ggplot(aes(x = repunit, y = sum_pi, fill = mixture_collection)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  scale_fill_manual(values = c("darkgreen", "lightseagreen", "dodgerblue", "midnightblue"))
+
+```
+
+Look at individual assignments - and then filter individuals before summarizing the mixing proportions
+```{r}
+# what about z-scores, we'd expect some outliers
+top_holdout_assign <- holdout_assigned$indiv_posteriors %>%
+  group_by(indiv) %>%
+  slice_max(., order_by = PofZ)
+
+top_holdout_assign %>%
+  filter(z_score < -3 | z_score > 3) 
+
+```
+Technically, that would be an outlier, but it's correctly assigned.
+
+
+What are the expected proportions, so I can generate a plot of expected vs. observed
+```{r}
+holdout_n <- mix_holdout %>%
+  group_by(collection) %>%
+  tally() %>%
+  rename(expected = n) %>%
+  separate(collection, into = c("NWHI", "repunit"))
+
+```
+
+```{r}
+# what about using the individual assignments?
+holdout_results <- top_holdout_assign %>%
+  group_by(repunit) %>%
+  tally() %>%
+  rename(observed = n)
+
+holdout_n %>%
+  left_join(., holdout_results) %>%
+  pivot_longer(cols = 3:4, names_to = "type", values_to = "samples") %>%
+  ggplot(aes(x = repunit, y = samples, fill = type)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  theme_minimal() 
+
+```
+
+Until I figure out exactly what to do with the mixing proportions, I'll go forward with comparing the expected vs. observed individual assignments:
+
+Next steps:
+1. Play with mixing proportions
+2. test different samples per population in the baseline
+
+
+## Mixture bycatch assignment
+
+
+```{r}
+# for whatever reason, rubias is being finicky about the format and it's easiest to do this
+# to make sure both df are consistent
+mix2col <- mix_two_col %>%
+  rename(indiv = sampleID)
+tmp_combo <- bind_rows(ref_two_col, mix2col)
+
+mix <- tmp_combo %>%
+  filter(sample_type == "mixture")
+
+ref <- tmp_combo %>%
   filter(sample_type == "reference")
 ```
 
@@ -376,7 +643,7 @@ mix_assigned %>%
 
 ```
 
-848 bycatch samples, most of which are assigned at high probability.
+759 bycatch samples, most of which are assigned at high probability.
 
 ```{r}
 mix_assigned %>%
@@ -410,12 +677,13 @@ mix_assigned %>%
   geom_histogram() 
 
 ```
-There are some serious outliers and then some less significant outliers. Take a closer look:
+There are barely any outliers - maybe because the input data is better organized, with NAs explicit, etc.?
+
 
 ```{r}
 # z-score outliers
 mix_assigned %>%
-  filter(z_score < 5) %>%
+  filter(z_score < -3) %>%
   ggplot(aes(x = z_score)) +
   geom_histogram() 
 
@@ -427,15 +695,12 @@ The normal distribution looks asymmetrical: +2.5 on the right and -4 on the left
 ```{r}
 # z-score outliers
 mix_assigned %>%
-  filter(z_score > 3)
+  filter(z_score < -3)
+
 ```
+Laysan is clearly under-represented in the baseline - and that results in underestimate of proportion from the holdout data.
 
-Interesting. So the Lehua assignments have the crazy z-scores. But we also had very few baseline samples for Lehua. Not a lot of confidence in those assignments.
-
-The Laysan assignments that are between 3-4 z-scores could just be enough different because we only had 8 Laysan baseline samples? 
-
-I'm also curious to what extent timing (and date of baseline samples) plays a role here.
-
+Additional notes:
 We didn't have Pearl and Hermes - closer to Laysan - some of these bycatch could be from this colony, which has 1000s of birds, bigger than Laysan.
 
 
@@ -461,7 +726,7 @@ assigned_z_removed %>%
   theme_minimal()
 
 ```
-822 samples
+740 samples
 
 
 Thinking about how to do some type of accumulation curve? How many samples are included at what level of confidence?
@@ -484,11 +749,10 @@ Basically, I want to visualize the trade-off between type I and type II error.
 
 
 ```{r}
-metadata_ss <- read_csv("../data/processed/metadata_w_samplesheet.csv")
+#metadata_ss <- read_csv("../data/processed/metadata_w_samplesheet.csv")
+
 ```
-```{r}
-tmp.samp
-```
+
 
 Generate a full dataset to share with Jessie...
 ```{r}
@@ -499,25 +763,51 @@ tmp.samp <- top_assign %>%
       filter(!str_detect(indiv, "PCMB")) %>%
   select(-missing_loci)
 
-tmp.samp$indiv <- gsub("BFAL", "", tmp.samp$indiv)
-tmp.samp
-           
 
-bycatch_w_meta <- metadata_ss %>% 
-  unite(col = "indiv", gtseq_run, id, sep = "_") %>%
-  left_join(., assigned_z_removed) %>%
-  select(-missing_loci)
+bycatch_w_meta <- meta_w_ss %>% 
+  #unite(col = "indiv", gtseq_run, id, sep = "_") %>%
+  left_join(., assigned_z_removed, by = c("MWVCRC#" = "indiv")) %>%
+  select(-missing_loci) %>%
+  select(-c(20:28)) %>% # remove duplicates
+  unique() %>%
+  filter(!is.na(mixture_collection))
 
+# confirm that duplicates are removed
+bycatch_w_meta %>%
+  group_by(`MWVCRC#`) %>%
+  tally() %>%
+  filter(n >1) # no duplicates
+  
+  
+```
+
+Laysan is clearly under-represented in the baseline. I might need to modify the baseline to account for that.
+
+Okay, next steps:
+
+1. Implement analysis function to deal with multiply-genotyped individuals. [DONE]
+2. Revise the baseline to account for un-even numbers of individuals (Laysan under-represented).
+3. Use banded birds that were not part of the lcWGS ascertainment panel for hold-out dataset to evaluate assignment success.[DONE]
+
+
+
+
+
+
+
+
+
+```{r}
+# output
 bycatch_w_meta %>%
     write_csv("../data/processed/bycatch_assignments_w_metadata.csv")
 
 
 # reference data
 tmp.samp %>%
-  left_join(., metadata_ss, by = c("indiv" = "MWVCRC#")) %>%
+  left_join(., meta_w_ss, by = c("indiv" = "MWVCRC#")) %>%
   write_csv("../data/processed/reference_banded_assignments_w_metadata.csv")
 ```
-130 samples without probability of assignment - some of those are likely (possibly banded birds that were used as reference).
 
 
 

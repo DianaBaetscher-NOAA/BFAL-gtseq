@@ -17,6 +17,20 @@ library(data.table)
 meta <- read_csv("../data/metadata/Oikonos_BFAL_Metadata_12.21.2022.csv") %>%
   select(-c(20:27))
 
+# create some consistent designations for banded locations
+banded_meta_locs <- meta %>%
+  #filter(`BandY/N` == "TRUE") %>%
+  #select(Location, `Loc-Abbr`) %>%
+  #unique() %>%
+   mutate(Location = ifelse(Location == "French Frigate Shoals (Tern Island)", "Tern Island, French Frigate Shoals, HI", Location)) %>%
+    mutate(Location = ifelse(Location == "Laysan Island", "Laysan Island, Honolulu County, Hawaii", Location)) %>%
+      mutate(Location = ifelse(Location == "Kure Attol (Green Island)", "Green Island, Kure Atoll, Honolulu County, Hawaii", Location)) %>%
+       mutate(`Loc-Abbr` = ifelse(Location == "Tern Island, French Frigate Shoals, HI", "NWHI, FFS", `Loc-Abbr`)) %>%
+        mutate(`Loc-Abbr` = ifelse(Location == "Laysan Island, Honolulu County, Hawaii", "NWHI, Laysan", `Loc-Abbr`)) %>%
+          mutate(`Loc-Abbr` = ifelse(Location == "French Frigate Shoals", "NWHI, FFS", `Loc-Abbr`)) %>%
+            mutate(`Loc-Abbr` = ifelse(Location == "Green Island, Kure Atoll, Honolulu County, Hawaii", "NWHI, Kure", `Loc-Abbr`)) %>%
+  unique()
+
 ```
 
 
@@ -66,7 +80,7 @@ But what I actually need is a link between the metadata and the samplesheet
 ```{r}
 samplesheets2$Sample_ID <- gsub("BFAL", "", samplesheets2$Sample_ID)
 
-meta_w_samplesheet <- meta %>%
+meta_w_samplesheet <- banded_meta_locs %>%
   left_join(., samplesheets2, by = c("MWVCRC#" = "Sample_ID"))
 
 meta_w_samplesheet %>%
@@ -81,7 +95,8 @@ meta_w_samplesheet %>%
   filter(is.na(gtseq_run))
 
 ```
-We'll have to double-check that those made it here and are in Claire's office.
+3 samples that we don't have a record of genotyping. We can follow up on that later.
+
 
 
 Are there genotypes that have no metadata accounted for?
@@ -98,4 +113,4 @@ meta %>%
   filter(str_detect(`MWVCRC#`, "banded"))
 
 ```
-
+Potentially 13 (because 11-0293-reference is just a mismatch with the modification to the ID).
