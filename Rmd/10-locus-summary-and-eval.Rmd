@@ -3,6 +3,15 @@ title: "10-locus-summary-and-eval"
 output: html_notebook
 ---
 
+Update: 15 March 2023
+
+Updates: use the NAs explicit genos file. 
+Don't filter loci based on missing data at this point. 
+Just look at reference pops for evaluating HWE.
+
+
+
+
 23 February 2023
 
 Evaluating the loci that we're using for self-assignment and bycatch assignment.
@@ -22,18 +31,194 @@ library(DescTools)
 
 ```
 
-Once again, I need to finagle the dataset into a genind object.
+
+```{r}
+# read in rds file with genotypes
+genos_long <- read_rds("../data/processed/called_genos_na_explicit.rds")
+
+# just select the reference samples based on metadata
+samplesheets <- read_csv("../data/processed/full_metadata_w_samplesheet.csv")
+
+reference_samples <- samplesheets %>%
+  filter(Sample_Plate %in% c("BFAL001", "BFAL002") &
+           !is.na(Location)) %>%
+  arrange(Sample_ID) %>%
+  select(Sample_ID, gtseq_run, id, Location, `Loc-Abbr`)
+
+# combine the genotypes with the reference
+ref_genos <- reference_samples %>%
+  left_join(., genos_long, by = c("gtseq_run", "id")) 
+
+```
+
+Deal explicitly with duplicate samples:
+
+## Some initial filters
+
+### Take highest read-depth call for multiply-genotyped DNA_IDs
+
+I'm not sure if there are any of these, but best to leave it in here...
+
+Now, here is a harder operation: if an individual is multiply-genotyped, take the
+genotype with the highest total read depth.  
+```{r take-just-one}
+# slow-ish function to get the total read depth column
+tdepth <- function(a, d) {
+  if(any(is.na(a))) {
+    return(NA)
+  }
+  if(a[1]==a[2]) {
+    return(d[1])
+  } else {
+    return(d[1] + d[2])
+  }
+  
+}
+# this takes the highest read-depth instance of each duplicately-genotyped individual.
+geno_one_each <- ref_genos %>%
+  group_by(Sample_ID, locus, gtseq_run) %>%
+  mutate(total_depth = tdepth(allele, depth)) %>%
+  ungroup() %>%
+  arrange(Sample_ID, locus, total_depth, gtseq_run, depth) %>%
+  group_by(Sample_ID, locus) %>%
+  mutate(rank = 1:n()) %>% # this ranks all alleles for a given individual by depth
+  ungroup() %>%
+  filter(rank <= 2) # this takes the top ranked alleles and should remove duplicates
+  
+
+# how many samples now?
+geno_one_each %>%
+  filter(!is.na(Sample_ID)) %>%
+  group_by(Sample_ID) %>% 
+  select(Sample_ID, gtseq_run, id) %>%
+  unique() %>%
+  tally() 
+
+```
+
+
+Take a look at missing data overall:
+```{r}
+geno_one_each %>%
+  ggplot(aes(x = reorder(locus, depth), y = reorder(Sample_ID, depth), fill = log10(depth))) +
+  geom_tile()
+
+```
+Deal with missing data:
+
+
+## Missing data in loci
+
+How many loci and how many alleles?
+```{r}
+# alleles
+geno_one_each %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique()
+
+# loci
+geno_one_each %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique() %>%
+  group_by(locus) %>%
+  tally() %>%
+  arrange(desc(n))
+
+```
+In the reference, 458 alleles across 189 loci with 1-6 alleles per locus.
+
+Some individuals are missing all their data, and some loci are missing all their data.
+Beginning with loci:
+
+```{r}
+# missing data across loci
+locs_to_toss <- geno_one_each %>%
+  group_by(locus) %>%
+  mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
+  summarise(sum(missingness)) %>% # 189 loci x2 = total
+  filter(`sum(missingness)`>151) %>% # more than 50% missing data (given 151 individuals)
+  select(locus) # drop those loci for now and see how the assignment goes
+
+# just the keepers
+genos_locs_filtered <- geno_one_each %>%
+  anti_join(., locs_to_toss)
+
+
+```
+Remove these 4 loci because of too much missing data in the reference samples.
+
+
+## Missing data in individuals
+
+Total number of loci = 185
+
+Total number of samples = 151
+
+```{r}
+inds_to_toss <- genos_locs_filtered %>%
+  group_by(Sample_ID) %>%
+  mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
+  summarise(sum(missingness)) %>%
+  arrange(desc(`sum(missingness)`)) %>%
+  #filter(`sum(missingness)` > 47) # remove samples with >25% missing data
+ filter(`sum(missingness)` > 19) # remove samples with >10% missing data
+
+# just the keepers
+genos_locs_ind_filtered <- genos_locs_filtered %>%
+  anti_join(., inds_to_toss)
+
+```
+18 samples removed with >25% missing data.
+
+
+
+Now look at missing data:
+```{r}
+genos_locs_ind_filtered %>%
+  ggplot(aes(x = reorder(locus, depth), y = reorder(Sample_ID, depth), fill = log10(depth))) +
+  geom_tile()
+
+```
+Much better. Now move forward from here.
+
+
+## Prep data for analysis
+
+
+```{r}
+# first make integers of the alleles
+alle_idxs <- genos_locs_ind_filtered %>% 
+  filter(!is.na(Sample_ID)) %>%
+  dplyr::select(Sample_ID, locus, gene_copy, allele) %>%
+  group_by(locus) %>%
+  mutate(alleidx = as.integer(factor(allele, levels = unique(allele)))) %>%
+  ungroup() %>%
+  arrange(Sample_ID, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
+
+# reformat
+reference <- alle_idxs %>%
+  inner_join(., reference_samples) %>%
+  select(-allele, -gtseq_run, -id) %>%
+  select(`Loc-Abbr`, Sample_ID, everything()) %>%
+  rename(collection = `Loc-Abbr`, indiv = Sample_ID)
+
+
+```
+
+
+I need to finagle the dataset into a genind object.
 
 ```{r}
 # read in data
-reference_genos <- read_rds("../data/processed/reference_genos.rds")
+reference_genos <- reference
 
 ```
 
 Check on missing data:
 ```{r}
-# number of missing alleles (max = 159*2)
-# out of 159 loci
+# number of missing alleles (max = 185*2)
 inds_to_toss_missing_data <- reference_genos %>%
   group_by(indiv) %>%
   filter(is.na(alleidx)) %>%
@@ -55,8 +240,11 @@ reference_genos %>%
 I feel fine about that. Let's see if that makes any of the HWE calculations easier because less missing data?
 
 ```{r}
-ref_genos_low_missing_data <- reference_genos %>%
-  anti_join(., inds_to_toss_missing_data)
+# SKIP THIS FOR NOW.
+# ref_genos_low_missing_data <- reference_genos %>%
+#   anti_join(., inds_to_toss_missing_data)
+
+ref_genos_low_missing_data <- reference_genos
 
 ```
 
@@ -104,7 +292,7 @@ df_for_conversion <- long_df0s %>%
   unique() %>%
   rename(GT = GENOTYPE) %>%
   mutate(GT = ifelse(GT == "000000", NA, GT)) %>%
-  filter(!STRATA %in% c("Whale-Skate", "Lehua"))
+  filter(!str_detect(STRATA, "Kauai"))
   
 
 df_for_conversion$STRATA <- as.factor(df_for_conversion$STRATA)
@@ -120,7 +308,7 @@ df_for_conversion %>%
   tally()
 
 ```
-Let's remove Lehua and Whale-Skate at this point because of so few samples.
+Let's remove Lehua and Kilauea at this point because of so few samples.
 
 ```{r}
 convert_df_wo_2pops <- df_for_conversion 
@@ -154,9 +342,6 @@ Expected heterozygosity (here: Hexp) is the heterozygosity expected in a populat
 # expected heterozygosity per population
 adegenet::Hs(genind2genpop(genind_df))
 ```
-I do wonder if I should combine some of the smaller pops - e.g., Whale-Skate, which is part of the French Frigate Shoals (FFS), which includes Tern Island.
-
-For now, I can remove Whale-Skate and discuss with Jessie if we want to make that a single reporting group.
 
 
 ```{r}
@@ -211,10 +396,10 @@ hwe_output <- round(pegas::hw.test(genind_df, B = 1000), digits = 3)
 
 # which ones are statistically sign.
 rownames_to_column(data.frame(hwe_output)) %>%
-  filter(Pr.exact < 0.05)
+  filter(Pr.exact < 0.01)
 
 ```
-26 loci that are out of HWE globally. (included is the funky one, scaffold_75_1184494) [31 with the missing data indivs removed from the baseline]
+27 loci that are out of HWE globally. (included is the funky one, scaffold_75_1184494) [31 with the missing data indivs removed from the baseline]
 
 After looking at the loci x population HWE info, I can remove any that are out of HWE in the majority of populations.
 
@@ -234,23 +419,36 @@ loci_to_toss_hwe <- rownames_to_column(as.data.frame(HWE.test.chisq), var = "pop
   group_by( locus) %>%
   tally() %>% # how many loci are out of HWE in how many populations?
   arrange(desc(n)) %>%
-  filter(n>2)
+  filter(n>3)
 
 ```
 
-Remove loci that are statistically out of HWE in >2 populations (the majority).
+Remove loci that are statistically out of HWE in >3 populations (the majority).
 
 
-That's only 5 loci.
+That's only 4 loci.
 
 ```{r}
 loci_to_toss_hwe %>%
   write_csv("csv_outputs/loci_to_toss_hwe.csv")
 
+loci_to_keep <- rownames_to_column(as.data.frame(HWE.test.chisq), var = "population") %>%
+  pivot_longer(cols= 2:length(rownames_to_column(as.data.frame(HWE.test.chisq))), names_to = "locus", values_to = "p_val") %>%
+  select(locus) %>%
+  unique() %>%
+  anti_join(., loci_to_toss_hwe)
+  
+
+
+loci_to_keep %>%
+  write_csv("csv_outputs/loci_to_keep_hwe.csv")
 # from here, I can generate a "final" dataset.
 ```
 
 Pivoting to a new Rmd `11-hwe-filtered-baseline-and-mixture.Rmd`.
+
+
+
 
 
 

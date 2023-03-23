@@ -28,7 +28,7 @@ library(lubridate)
 
 ```{r}
 # read in rds file with genotypes
-genos_long <- read_rds("../data/processed/called_genos.rds")
+genos_long <- read_rds("../data/processed/called_genos_na_explicit.rds")
 
 head(genos_long)
 ```
@@ -202,7 +202,14 @@ reference <- alle_idxs %>%
   select(-allele, -gtseq_run, -id) %>%
   select(population, Sample_ID, everything()) %>%
   rename(collection = population, indiv = Sample_ID)
+```
 
+
+
+
+
+
+```{r}
 # make two-col format
 ref_two_col <- reference %>%
   unite("loc", 3:4, sep = ".") %>%
@@ -293,69 +300,6 @@ top_assign %>%
 Maybe a different species accidentally? I can double-check the sample number with metadata that Jessie sent. Other than that, things are looking good to proceed with mixture assignment.
 
 
-## Mixture bycatch assignment
-
-
-```{r}
-# get the format right
-mix_two_col <- alle_idxs %>%
-  anti_join(., ref_pops) %>%
-  unite(gtseq_run, id, col = "indiv", sep = "_") %>%
-  select(-allele) %>%
-  unite("loc", 2:3, sep = ".") %>%
-  pivot_wider(names_from = loc, values_from = alleidx) %>%
-  mutate(repunit = NA) %>%
-  mutate(sample_type = "mixture") %>%
-  mutate(collection = "bycatch") %>%
-  select(sample_type, repunit, collection, everything())
-
-mix_two_col$repunit <- as.character(mix_two_col$repunit)
-head(mix_two_col)
-
-```
-
-```{r}
-# for whatever reason, rubias is being finicky about the format and it's easiest to do this
-# to make sure both df are consistent
-tmp <- bind_rows(ref_two_col, mix_two_col)
-
-mix <- tmp %>%
-  filter(sample_type == "mixture")
-
-ref <- tmp %>%
-  filter(sample_type == "reference")
-```
-
-
-```{r}
-# mixture analysis
-bycatch_assign <- rubias::infer_mixture(reference = ref, mixture = mix, gen_start_col = 5)
-
-```
-
-Bycatch results for mixture
-```{r}
-mix_assigned <- bycatch_assign$indiv_posteriors %>%
-  group_by(indiv) %>%
-  slice_max(., order_by = PofZ)
-
-
-# distribution of PofZ for top assignments
-mix_assigned %>%
-  ggplot(aes(x = PofZ)) +
-  geom_histogram()
-
-```
-848 bycatch samples, most of which are assigned at high probability.
-
-
-```{r}
-mix_assigned %>%
-  filter(PofZ > 0.9)
-
-```
-
-Before going deeper into the assignment results, let's just confirm the loci we're using are okay.
 
 
 Output genotypes/data for evaluating the loci in `10-locus-summary-and-eval.Rmd`
@@ -373,5 +317,6 @@ alle_idxs %>%
 
 reference %>%
   write_rds("../data/processed/reference_genos.rds")
+
 ```
 

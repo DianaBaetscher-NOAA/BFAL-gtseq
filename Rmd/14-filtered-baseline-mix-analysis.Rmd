@@ -1,0 +1,556 @@
+---
+title: "14-filtered-baseline-mix-analysis"
+author: "Diana Baetscher"
+date: "2023-03-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+22 March 2023
+
+This is an updated version of `11-hwe-filtered...`
+
+
+This relies on the locus evaluation in `10-locus-summary-and-eval.Rmd` and the initial analysis in `09-reference-baseline-mixture-analysis.Rmd`.
+
+Implementing the functions for reading in genos from the rds files created by microhaplot.
+
+I used `R-main/01-compile-and-tidy-rds-files.R` to generate an rds file with the genotype info in `data/processed`.
+
+The R function uses a minimum read depth of 10 reads for the first allele and 6 reads for the second allele and a minimum allele balance of 0.4 (this can be modified in `R/microhaplot-genos-funcs.R`).
+
+The VCF file used to generate these rds files is `BFAL_reference_filtered.vcf`, currently on Sedna. I might return to this by merging additional samples into that VCF file, but those would be bycatch - not reference samples - and the benefit to doing so is uncertain.
+
+Read in the `loci_to_toss_hwe.csv` file and then everything should be straightforward and ported from the prior analysis.
+
+
+```{r load-libraries}
+library(tidyverse)
+library(readxl)
+library(stringr)
+library(lubridate)
+library(rubias)
+```
+
+
+
+
+```{r}
+# remove the loci that had deviations from HWE in the majority of populations
+loci_to_keep <- read_csv("csv_outputs/loci_to_keep_hwe.csv")
+
+# read in the metadata attached to the genotypes - NOTE, this doesn't preserve the NAs explicitly!!
+genos <- read_rds("../data/processed/genos_w_metadata_samplesheets.rds") %>%
+  inner_join(., loci_to_keep) %>%
+  rename(sampleID = Sample_ID) 
+unq_samples <- genos %>%
+  select(sampleID, population, reference, gtseq_run, id, Location) %>%
+  unique
+
+# read in rds file with genotypes
+genos_NA_explicit <- read_rds("../data/processed/called_genos_na_explicit.rds") %>%
+  inner_join(., loci_to_keep)
+
+genos_long <- genos_NA_explicit %>%
+  left_join(., unq_samples)
+
+
+# quick list of the reference samples and their respective populations
+ref_pops <- genos_long %>%
+  filter(!is.na(reference)) %>%
+  select(sampleID, population, Location) %>%
+  unique()
+
+
+genos_long %>% head()
+```
+
+ ## Some initial filters
+
+### Take highest read-depth call for multiply-genotyped DNA_IDs
+
+I'm not sure if there are any of these, but best to leave it in here...
+
+Now, here is a harder operation: if an individual is multiply-genotyped, take the
+genotype with the highest total read depth.  
+```{r take-just-one}
+# slow-ish function to get the total read depth column
+tdepth <- function(a, d) {
+  if(any(is.na(a))) {
+    return(NA)
+  }
+  if(a[1]==a[2]) {
+    return(d[1])
+  } else {
+    return(d[1] + d[2])
+  }
+  
+}
+# this takes the highest read-depth instance of each duplicately-genotyped individual.
+geno_one_each <- genos_long %>%
+  group_by(sampleID, locus, gtseq_run) %>%
+  mutate(total_depth = tdepth(allele, depth)) %>%
+  ungroup() %>%
+  arrange(sampleID, locus, total_depth, gtseq_run, depth) %>%
+  group_by(sampleID, locus) %>%
+  mutate(rank = 1:n()) %>% # this ranks all alleles for a given individual by depth
+  ungroup() %>%
+  filter(rank <= 2) # this takes the top ranked alleles and should remove duplicates
+  
+
+# how many samples now?
+geno_one_each %>%
+  filter(!is.na(sampleID)) %>%
+  group_by(sampleID) %>% 
+  select(sampleID, gtseq_run, id) %>%
+  unique() %>%
+  tally() %>%
+  filter(n>1) 
+
+geno_one_each %>%
+  filter(!is.na(sampleID)) %>%
+  select(sampleID) %>%
+  unique()
+```
+961 unique samples
+
+
+```{r}
+# try using this df to eliminate issues with duplication
+genos_no_dups <- geno_one_each %>%
+  select(-gtseq_run, -id, -total_depth, -rank)
+
+```
+
+
+
+
+
+I need to vet both the loci and the individuals for missing data, etc.
+
+## Locus evaluation
+
+How many loci and how many alleles?
+
+```{r}
+# alleles
+genos_no_dups %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique() %>%
+  arrange(locus)
+
+# loci
+genos_no_dups %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique() %>%
+  group_by(locus) %>%
+  tally() %>%
+  arrange(desc(n))
+
+  
+```
+
+458 alleles across 182 loci with between 1-8 alleles per locus.
+
+quick look at the loci with only 1 allele:
+```{r}
+monomorphic <- genos_no_dups %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique() %>%
+  group_by(locus) %>%
+  tally() %>%
+  filter(n == 1) %>%
+  left_join(., genos_no_dups) %>%
+  select(locus, allele) %>%
+  unique() %>%
+  filter(!is.na(allele)) %>%
+  select(locus)
+
+polymorphic_no_dups <- genos_no_dups %>%
+  anti_join(., monomorphic)
+
+```
+I might as well get rid of the monomorphic loci, no?
+
+
+Missing data:
+
+961 individuals * 2 alleles per locus = 1922 alleles per locus
+```{r}
+961*2
+```
+
+
+50% missing data per locus = 961
+```{r}
+# missing data across loci
+locs_to_toss <- polymorphic_no_dups %>%
+  group_by(locus) %>%
+  mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
+  summarise(sum(missingness)) %>% 
+  filter(`sum(missingness)`>961) %>% # more than 50% missing data
+  select(locus) # drop those loci for now and see how the assignment goes
+
+# just the keepers
+genos_locs_filtered <- polymorphic_no_dups %>%
+  anti_join(., locs_to_toss)
+
+```
+Drop 3 loci with > 50% missing data.
+
+That brings the number of loci down to 168. (11 were monomorphic)
+
+```{r}
+# summary of remaining loci
+genos_locs_filtered %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique()
+
+genos_locs_filtered %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique() %>%
+  group_by(locus) %>%
+  tally() %>%
+  arrange(desc(n))
+
+```
+
+First, look at the loci for missingness and \>2 haplotypes in an individual [This might be masked by the function that reads in the rds file??]
+
+```{r}
+polymorphic_no_dups %>%
+  group_by(sampleID, locus) %>% # there should be no more than 2 alleles for a given indiv/locus
+  tally() %>%
+  filter(n > 2)
+
+```
+
+## Missing data in individuals
+
+Total number of loci = 168
+```{r}
+168*2
+```
+```{r}
+336*0.25
+```
+
+Total number of samples = 961
+
+```{r}
+inds_to_toss <- genos_locs_filtered %>%
+  group_by(sampleID) %>%
+  mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
+  summarise(sum(missingness)) %>%
+  arrange(desc(`sum(missingness)`)) %>%
+  filter(`sum(missingness)` > 85) # remove samples with >25% missing data
+
+# just the keepers
+genos_locs_ind_filtered <- genos_locs_filtered %>%
+  anti_join(., inds_to_toss)
+
+```
+65 samples had >25% missing data
+
+
+```{r}
+65/961
+```
+6.7% of samples were dropped bec of missing data.
+
+Take a look at that dataset
+
+```{r}
+genos_locs_ind_filtered  %>%
+  ggplot(aes(x = reorder(locus, depth), y = reorder(sampleID, depth), fill = log10(depth))) +
+  geom_tile()
+
+```
+
+## self-assignment
+
+Doing a sanity check with the reference baseline
+
+```{r}
+# first make integers of the alleles
+alle_idxs <- genos_locs_ind_filtered %>% 
+  filter(!is.na(sampleID)) %>%
+  dplyr::select(sampleID, locus, gene_copy, allele) %>%
+  group_by(locus) %>%
+  mutate(alleidx = as.integer(factor(allele, levels = unique(allele)))) %>%
+  ungroup() %>%
+  arrange(sampleID, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
+
+```
+
+## get the allele indexes for just the reference populations
+
+
+```{r}
+# format for rubias
+reference <- alle_idxs %>%
+  inner_join(., ref_pops) %>%
+  select(-allele, -Location) %>%
+  select(population, sampleID, everything()) %>%
+  rename(collection = population, indiv = sampleID)
+
+# make two-col format
+ref_two_col <- reference %>%
+  unite("loc", 3:4, sep = ".") %>%
+  pivot_wider(names_from = loc, values_from = alleidx) %>%
+  mutate(repunit = collection) %>%
+  mutate(sample_type = "reference") %>%
+  select(sample_type, repunit, collection, everything()) %>% # modify repunit info for Whale-Skate and Tern, which should be a single repunit for the French Frigate Shoals
+  mutate(repunit = ifelse(collection %in% c("Tern", "Whale-Skate"), "FFS", repunit)) %>%
+  filter(repunit != "Lehua") %>%
+  filter(indiv != "21-0173") # remove the z-score outlier from the self-assignment (Laysan bird)
+
+```
+
+
+```{r}
+# self-assignment
+#baseline_assign <- rubias::self_assign(ref_two_col, gen_start_col = 5)
+
+```
+
+```{r}
+# top_assign <- baseline_assign %>%
+#   group_by(indiv) %>%
+#   slice_max(., order_by = scaled_likelihood) 
+# 
+# top_assign %>%
+#   ggplot(aes(z_score)) +
+#   geom_histogram()
+# 
+# top_assign %>%
+#   filter(z_score < -5)
+```
+
+Based on the self-assignment, remove the z-score outlier (implemented above)
+
+
+
+
+
+A little background here:
+
+Rather than using self-assignment, I need to look at the leave-one-out assessment because I know that doing self-assignment with my reference being identical to my ascertainment samples is going to be upwardly biased.
+
+## Leave one out assessment for the baseline
+
+```{r}
+loo_output <- assess_reference_loo(ref_two_col, gen_start_col = 5, return_indiv_posteriors = T)
+
+```
+
+```{r}
+AW_resum<-loo_output$mixing_proportions %>%
+  group_by(iter, repunit) %>%
+  summarise(true_repprop = sum(true_pi), 
+            reprop_posterior_mean = sum(post_mean_pi),
+            repu_n = sum(n)) %>%
+  mutate(repu_n_prop = repu_n / sum(repu_n))%>%
+  mutate(Diff = reprop_posterior_mean - repu_n_prop)
+
+ggplot(AW_resum, aes(x = repu_n_prop, # Prop of ind. actually simulated 
+                     y = reprop_posterior_mean, #inferred proportion
+                     colour = repunit)) +
+  geom_point(alpha = 0.7) +
+  geom_abline(intercept = 0, slope = 1) +
+  facet_grid(cols = vars(repunit)) +
+  labs(y = "Inferred Proporiton",
+       x = "True Proportion",
+       color = "Reporting group")+
+  theme_bw()
+
+ggsave("pdf_outputs/LOO_simulated_proportions_group.pdf", width = 10, height = 5)
+```
+
+
+```{r}
+ggplot(AW_resum, aes(x = repu_n_prop, # Prop of ind. actually simulated 
+                     y = Diff, #inferred proportion
+                     colour = repunit)) +
+  geom_point() +
+  geom_hline(yintercept = 0.1,lty=2,col=2) +
+  geom_hline(yintercept = - 0.1,lty=2,col=2) +
+  theme_bw()  +
+  labs(y = "Difference between simulated & inferred mixture proportion",
+       x = "True proportion of simulated reporting group",
+       color = "Reporting group") +
+  theme(
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
+
+```
+
+
+That's sound evidence that we shouldn't be assigning Lehua.
+
+
+At the individual level...
+
+```{r}
+# top p of z for each simulated individual
+loo_top_pofz <- loo_output$indiv_posteriors %>%
+  group_by(repunit_scenario, collection_scenario, iter, indiv, simulated_repunit, simulated_collection) %>%
+  slice_max(., order_by = PofZ)
+
+loo_top_pofz %>%
+  filter(PofZ > 0.95) %>%
+  ggplot(aes(x = simulated_repunit, y = repunit, color = simulated_repunit)) +
+  geom_jitter(alpha = 0.2) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
+```
+
+
+```{r}
+# plot individual posteriors for LOO
+
+loo_top_pofz %>%
+  filter(PofZ > 0.90) %>%
+  group_by(simulated_repunit, repunit) %>%
+  ggplot(aes(x = simulated_repunit, fill = repunit)) +
+  geom_bar(stat = "count", position = "stack") +
+  theme_minimal() +
+  labs(x = "Simulated reporting group",
+       y = "Number of simulated samples",
+       fill = "Assigned reporting group") +
+  scale_fill_manual(values = c("#74c476", "dodgerblue", "darkgreen", "darkslateblue", "tomato")) +
+  theme(
+    axis.title.x = element_text(margin = margin(t=10)),
+      axis.title.y = element_text(margin = margin(r = 10))
+  )
+  
+
+ggsave("pdf_outputs/LOO_indiv_posteriors90.pdf", width = 8, height = 5)
+  
+
+```
+
+
+
+
+## Mixture bycatch assignment
+
+
+
+```{r}
+# format for rubias
+mix_idx <- alle_idxs %>%
+  anti_join(., ref_pops, by = c("sampleID")) %>%
+  select(-allele) %>%
+  mutate(collection = "bycatch") %>%
+  rename(indiv = sampleID) %>%
+  unique()
+
+mix_idx %>%
+  unite("loc", 2:3, sep = ".") %>%
+  dplyr::group_by(indiv, collection, loc) %>%
+    dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
+    dplyr::filter(n > 1L)
+
+# same issue??
+# remove those
+
+tmp <- mix_idx %>%
+  filter(!indiv %in% c("11-0293", "19-0164"))
+```
+
+
+```{r}
+# make two-col format
+mix_two_col <- tmp %>%
+  arrange(indiv, locus, gene_copy) %>%
+  unite("loc", 2:3, sep = ".") %>%
+  pivot_wider(names_from = loc, values_from = alleidx) %>%
+  mutate(repunit = NA) %>%
+  mutate(sample_type = "mixture") %>%
+  select(sample_type, repunit, collection, everything())
+
+# formatting for compatibility
+tmp_combo <- bind_rows(ref_two_col, mix_two_col)
+
+mix <- tmp_combo %>%
+  filter(sample_type == "mixture")
+
+ref <- tmp_combo %>%
+  filter(sample_type == "reference")
+
+```
+
+
+
+```{r}
+# mixture analysis
+bycatch_assign <- rubias::infer_mixture(reference = ref, mixture = mix, gen_start_col = 5)
+
+```
+
+```{r}
+mix_assigned <- bycatch_assign$indiv_posteriors %>%
+  group_by(indiv) %>%
+  slice_max(., order_by = PofZ)
+
+
+# distribution of PofZ for top assignments
+mix_assigned %>%
+  ggplot(aes(x = PofZ)) +
+  geom_histogram()
+
+
+```
+766 bycatch birds (this is the 961-65 with missing data, -129 in the reference populations)
+
+what % of that assigned at >90% PofZ?
+```{r}
+mix_assigned %>%
+  filter(PofZ >0.90)
+
+600/766
+
+```
+78% of bycatch assigned at >90%
+
+```{r}
+mix_assigned %>%
+  ggplot(aes(x = z_score)) +
+  geom_histogram()
+
+```
+
+
+The birds that are out past 8 are almost certainly not from one of our breeding colonies
+
+```{r}
+mix_assigned %>%
+  filter(z_score < -5)
+
+```
+All of the birds with low z-scores look like they're closest to Laysan.
+
+```{r}
+# What about the rest of the distribution?
+mix_assigned %>%
+  filter(PofZ > 0.9 & z_score > -5) %>%
+  ggplot(aes(x = repunit, fill = collection)) +
+  geom_bar(stat = "count") +
+  theme_minimal()
+
+```
+
+

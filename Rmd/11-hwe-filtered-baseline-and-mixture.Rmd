@@ -34,6 +34,7 @@ loci_to_toss_hwe <- read_csv("csv_outputs/loci_to_toss_hwe.csv")
 genos_long <- read_rds("../data/processed/called_genos_na_explicit.rds") %>%
   anti_join(., loci_to_toss_hwe)
   
+  
 ```
 
 Add metadata
@@ -91,7 +92,8 @@ ref_banded_birds$sampleID <- gsub("BFAL", "", ref_banded_birds$sampleID)
 
 reference_samples <- ref_samples %>%
   anti_join(., ref_banded_birds, by = c("gtseq_run", "id")) %>%
-  bind_rows(ref_banded_birds)
+  bind_rows(ref_banded_birds) %>%
+  filter(sampleID != "21-0173") # remove the one Laysan bird that was a big outlier in the z-scores
 
 # 137 samples included in the reference data  
 ref_pops <- reference_samples %>%
@@ -116,9 +118,20 @@ duplicates <- all_samples_w_ids %>%
   filter(n>1)
 
 duplicates %>%
-  left_join(., all_samples_w_ids)
+  left_join(., all_samples_w_ids) %>%
+  filter(gtseq_run != "gtseq5") %>% # assuming those are banded birds
+  arrange(sampleID) %>%
+  group_by(sampleID) %>%
+  tally() %>%
+  filter(n>1) %>%
+  select(sampleID) %>%
+  left_join(., meta_w_ss, by = c("sampleID" = "MWVCRC#")) %>%
+  write_csv("csv_outputs/duplicate_samples.csv")
+
 ```
-Seems weird that so many were genotyped twice inadvertently.
+These are the tissues for which we either a) got multiple muscle samples or b) genotyped inadvertantly twice, or c) mislabeled??
+
+
 
 ```{r}
 meta_w_ss %>%
@@ -171,14 +184,15 @@ geno_one_each <- genos_w_ids %>%
 
 # how many samples now?
 geno_one_each %>%
-  group_by(sampleID) %>%
+  filter(!is.na(sampleID)) %>%
+  group_by(sampleID) %>% 
   select(sampleID, gtseq_run, id) %>%
   unique() %>%
   tally() %>%
   filter(n>1) 
 
 ```
-950 unique sampleIDs; 38 samples were genotyped twice.
+949 unique sampleIDs; 38 samples were genotyped twice.
 
 Because there are multiple gtseq runs/ids for the same individual, I should pivot to using the sampleID as the unique key, and there is only one complete set of alleles for each sampleID.
 
@@ -225,13 +239,16 @@ genos_no_dups %>%
 
 Missing data:
 
+949 individuals * 2 alleles per locus = 1898 alleles per locus
+
+50% missing data per locus = 949
 ```{r}
 # missing data across loci
 locs_to_toss <- genos_no_dups %>%
   group_by(locus) %>%
   mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
   summarise(sum(missingness)) %>% # 190 loci x2 = total
-  filter(`sum(missingness)`>190) %>% # more than 50% missing data
+  filter(`sum(missingness)`>949) %>% # more than 50% missing data
   select(locus) # drop those loci for now and see how the assignment goes
 
 # just the keepers
@@ -239,6 +256,9 @@ genos_locs_filtered <- genos_no_dups %>%
   anti_join(., locs_to_toss)
 
 ```
+
+
+
 
 ```{r}
 # summary of remaining loci
@@ -257,9 +277,8 @@ genos_locs_filtered %>%
 
 ```
 
-396 alleles in 161 loci with 1-8 alleles per locus.
+444 alleles in 178 loci with 1-8 alleles per locus.
 
-I think a lot of this was dealt with in the `10-locus-summary...` file.
 
 First, look at the loci for missingness and \>2 haplotypes in an individual [This might be masked by the function that reads in the rds file??]
 
@@ -273,9 +292,9 @@ genos_no_dups %>%
 
 ## Missing data in individuals
 
-Total number of loci = 161 Total number of gene copies = 322
+Total number of loci = 178 Total number of gene copies = 356
 
-Total number of samples = 950
+Total number of samples = 949
 
 ```{r}
 inds_to_toss <- genos_locs_filtered %>%
@@ -283,7 +302,7 @@ inds_to_toss <- genos_locs_filtered %>%
   mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
   summarise(sum(missingness)) %>%
   arrange(desc(`sum(missingness)`)) %>%
-  filter(`sum(missingness)` > 81) # remove samples with >25% missing data
+  filter(`sum(missingness)` > 89) # remove samples with >25% missing data
 
 # just the keepers
 genos_locs_ind_filtered <- genos_locs_filtered %>%
@@ -296,7 +315,7 @@ There's a lot of missing data, unfortunately. We might use a higher threshold fo
 25% missing data threshold = drop 61 indivs; keep 889.
 
 ```{r}
-889/950
+883/949
 ```
 
 Take a look at that dataset
@@ -315,6 +334,7 @@ Doing a sanity check with the reference baseline
 ```{r}
 # first make integers of the alleles
 alle_idxs <- genos_locs_ind_filtered %>% 
+  filter(!is.na(sampleID)) %>%
   dplyr::select(sampleID, locus, gene_copy, allele) %>%
   group_by(locus) %>%
   mutate(alleidx = as.integer(factor(allele, levels = unique(allele)))) %>%
@@ -373,6 +393,44 @@ ref_two_col %>%
   tally()
 
 ```
+A little background here:
+
+Rather than using self-assignment, I need to look at the leave-one-out assessment because I know that doing self-assignment with my reference being identical to my ascertainment samples is going to be upwardly biased.
+
+
+```{r}
+library(rubias)
+
+loo_output <- assess_reference_loo(ref_two_col, gen_start_col = 5, return_indiv_posteriors = T)
+
+# top p of z for each simulated individual
+loo_top_pofz <- loo_output$indiv_posteriors %>%
+  group_by(repunit_scenario, collection_scenario, iter, indiv, simulated_repunit, simulated_collection) %>%
+  slice_max(., order_by = PofZ)
+
+loo_top_pofz %>%
+  filter(simulated_repunit != repunit &
+           PofZ > 0.9)
+
+405/5000
+158/5000
+```
+overall: 405 rows out of 5000 (8% mis-assignments)
+at the 90% probability threshold: 158/5000 3% misassignments 
+
+
+```{r loo-mixing-proportions}
+# loo_output %>%
+#   group_by(repunit, iter) %>%
+#   summarise(sum_true = sum(true_pi), sum_inferred= sum(post_mean_pi))
+```
+compare hard-calling to mixing proportions
+
+
+
+
+
+
 
 
 ```{r}
@@ -399,12 +457,12 @@ top_assign %>%
   filter(repunit != inferred_repunit)
 
 top_assign %>%
-  filter(repunit != inferred_repunit,
+  filter(repunit != inferred_repunit &
          scaled_likelihood > 0.9)
 
 ```
 
-8 mis-assignments, but only 4 with a scaled-likelihood > 0.9.
+7 mis-assignments, but only 4 with a scaled-likelihood > 0.9.
 
 
 So overall:
@@ -413,28 +471,64 @@ So overall:
 # correct assignment with no likelihood threshold?
 top_assign %>%
   filter(repunit == inferred_repunit)
-119/127
+
+119/126
 
 top_assign %>%
   filter(scaled_likelihood > 0.9 &
-         repunit == inferred_repunit)
+         repunit == inferred_repunit) 
 ```
 
-127 samples in the reference baseline (10 dropped out bec of missing data).
+126 samples in the reference baseline (11 dropped out bec of missing data).
 
-94% of samples correctly assigned at 90% scaled likelihood.
+94% of samples correctly assigned at any scaled likelihood.
 
 ```{r}
-113/127
+119/126
 ```
 
 If we only look at samples that were assigned at \> 90% threshold:
 
 ```{r}
-113/119
+
+mypalette <- c("#006d2c", "#31a354", "#74c476",  "skyblue", "darkslateblue", "dodgerblue", # Hawaii - greens, blues
+               "tomato") # Japan - red
 ```
 
-Which would be 95% accurate assignment.
+
+```{r}
+top_assign %>%
+  filter(scaled_likelihood > 0.9) %>%
+  group_by(repunit, inferred_repunit) %>%
+  tally() %>%
+  ggplot(aes(x = repunit, y = n, fill = inferred_repunit)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_minimal() +
+  labs(title = "Self-assignment of reference birds to baseline, 90% probability",
+       y = "Samples",
+       x = "Baseline reporting unit",
+       fill = "Inferred reporting unit") +
+  scale_fill_manual(values = c("#74c476", "dodgerblue", "darkgreen", "darkslateblue", "tomato")) +
+  theme(
+    axis.title.x = element_text(margin = margin(t=10)),
+      axis.title.y = element_text(margin = margin(r = 10))
+  )
+  
+
+ggsave("pdf_outputs/AscertainmentSamples_self_assignment90.pdf", width = 8, height = 5)
+  
+  
+  
+
+top_assign %>%
+  filter(scaled_likelihood > 0.9 &
+           repunit == inferred_repunit)
+
+116/120
+
+```
+
+Which would be 97% accurate assignment... but again, that is using the ascertainment samples. 
 
 Quick look at z-scores:
 
@@ -445,7 +539,7 @@ top_assign %>%
 
 ```
 
-Woah. There's an outlier.
+Woah. There's one outlier.
 
 ```{r}
 top_assign %>%
@@ -458,11 +552,12 @@ Maybe a different species accidentally? I can double-check the sample number wit
 Also, Jessie mentioned hybrids between Laysan and BFAL...
 
 ```{r}
+# correct number of alleles?
 alle_idxs %>%
   inner_join(., ref_pops) %>%
   group_by(sampleID) %>%
   tally() %>%
-  filter(n >322)
+  filter(n >356)
 
 ```
 
@@ -534,13 +629,13 @@ ref <- tmp %>%
 759 samples in this mixture dataframe
 174 banded birds with location information
 
-66 banded birds in the hold out dataset.
+62 banded birds in the hold out dataset.
 
 
 
 ```{r}
 # mixture analysis for the hold out dataset
-holdout_assigned <- rubias::infer_mixture(reference = ref, mixture = mix_holdout, gen_start_col = 5)
+# holdout_assigned <- rubias::infer_mixture(reference = ref, mixture = mix_holdout, gen_start_col = 5)
 
 
 ```
@@ -554,7 +649,7 @@ holdout_assigned$mixing_proportions %>%
   ggplot(aes(x = repunit, y = sum_pi, fill = mixture_collection)) +
   geom_bar(stat = "identity") +
   theme_minimal() +
-  scale_fill_manual(values = c("darkgreen", "lightseagreen", "dodgerblue", "midnightblue"))
+    scale_fill_manual(values = c("#74c476", "dodgerblue", "darkgreen", "darkslateblue", "tomato"))
 
 ```
 
@@ -569,7 +664,7 @@ top_holdout_assign %>%
   filter(z_score < -3 | z_score > 3) 
 
 ```
-Technically, that would be an outlier, but it's correctly assigned.
+No z-score outliers. Great.
 
 
 What are the expected proportions, so I can generate a plot of expected vs. observed
@@ -598,11 +693,167 @@ holdout_n %>%
 
 ```
 
+What about using a 90% threshold?
+
+48/62 at that threshold
+
+```{r}
+top_holdout_assign %>%
+  filter(PofZ > 0.9) %>%
+  group_by(mixture_collection, repunit) %>%
+  tally() %>%
+  ggplot(aes(x = mixture_collection, y = n, fill = repunit)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_minimal() +
+  labs(title = "Assignment of banded birds (hold-out dataset) to baseline, 90% probability",
+       y = "Samples",
+       x = "Banding location",
+       fill = "Reporting unit") +
+    scale_fill_manual(values = c("#74c476", "dodgerblue", "darkgreen", "darkslateblue", "tomato")) +
+  theme(
+    axis.title.x = element_text(margin = margin(t=10)),
+      axis.title.y = element_text(margin = margin(r = 10))
+  )
+  
+
+ggsave("pdf_outputs/holdout_dataset_assignment90.pdf", width = 8, height = 5)
+```
+```{r}
+top_holdout_assign %>%
+  filter(PofZ > 0.9) %>%
+  group_by(mixture_collection, repunit) %>%
+  tally() 
+
+
+```
+
+```{r}
+holdout_results <- top_holdout_assign %>%
+  separate(mixture_collection, into = c("isl", "location"), sep = ", ")
+
+ho_results <- holdout_results %>%
+  filter(PofZ > 0.9) %>%
+  group_by(location, repunit) %>%
+  tally() %>%
+  ungroup() %>%
+  group_by(location) %>%
+  mutate(total = sum(n)) %>%
+  mutate(correct = ifelse(location == repunit, n/total, 0)) %>%
+  ungroup() %>%
+  filter(repunit == location)  %>%
+  select(location, repunit, correct)
+  
+ho_results
+```
+
+
+
 Until I figure out exactly what to do with the mixing proportions, I'll go forward with comparing the expected vs. observed individual assignments:
 
 Next steps:
 1. Play with mixing proportions
 2. test different samples per population in the baseline
+
+
+
+
+### Downsample the baseline
+
+```{r}
+# set.seed(731)
+# 
+# biguns <- ref_two_col %>%
+#   filter(repunit %in% c("FFS", "Kure", "Torishima"))
+# 
+# downsampled_bigs <- biguns %>%
+#   group_by(repunit) %>%
+#   sample_n(20, replace = F) %>% # the Laysan sample size is so small!!
+#   ungroup()
+# 
+# downsampled_baseline <- ref_two_col %>%
+#   anti_join(., biguns) %>%
+#   bind_rows(downsampled_bigs)
+```
+
+Now try using the downsampled baseline for the hold-out dataset:
+
+```{r}
+# mixture analysis for the hold out dataset
+# holdout_downsamp <- rubias::infer_mixture(reference = downsampled_baseline, mixture = mix_holdout, gen_start_col = 5)
+
+
+```
+
+```{r}
+# what about z-scores, we'd expect some outliers
+# top_holdout_downsamp <- holdout_downsamp$indiv_posteriors %>%
+#   group_by(indiv) %>%
+#   slice_max(., order_by = PofZ)
+# 
+# top_holdout_downsamp %>%
+#   filter(z_score < -3 | z_score > 3) 
+# 
+# top_holdout_downsamp %>%
+#   filter(PofZ > 0.9) %>%
+#   group_by(mixture_collection, repunit) %>%
+#   tally() %>%
+#   ggplot(aes(x = mixture_collection, y = n, fill = repunit)) +
+#   geom_bar(stat = "identity", position = "stack") +
+#   theme_minimal() +
+#   labs(title = "Assignment of banded birds (hold-out dataset) to baseline, 90% probability",
+#        y = "Samples",
+#        x = "Banding location",
+#        fill = "Reporting unit") +
+#     scale_fill_manual(values = c("#74c476", "dodgerblue", "darkgreen", "darkslateblue", "tomato")) +
+#   theme(
+#     axis.title.x = element_text(margin = margin(t=10)),
+#       axis.title.y = element_text(margin = margin(r = 10))
+#   )
+  
+```
+
+Evaluate by looking at correct % and then pick a path forward.
+
+
+
+```{r}
+# downsamp_results <- top_holdout_downsamp %>%
+#   separate(mixture_collection, into = c("isl", "location"), sep = ", ")
+# 
+# ds_results <- downsamp_results %>%
+#   filter(PofZ > 0.9) %>%
+#   group_by(location, repunit) %>%
+#   tally() %>%
+#   ungroup() %>%
+#   group_by(location) %>%
+#   mutate(total = sum(n)) %>%
+#   mutate(correct = ifelse(location == repunit, n/total, 0)) %>%
+#   ungroup() %>%
+#   filter(repunit == location) %>%
+#   rename(downsampled_correct = correct) %>%
+#   select(location, repunit, downsampled_correct)
+  
+
+```
+
+
+Comparison of downsampled results with original results
+```{r}
+# ho_results %>%
+#   left_join(., ds_results)
+
+```
+
+
+As expected, the bias is toward the FFS when there are many more samples in that reporting group. 
+I do wonder if having additional loci would be beneficial...
+
+
+
+
+
+
+
 
 
 ## Mixture bycatch assignment
@@ -644,6 +895,21 @@ mix_assigned %>%
 ```
 
 759 bycatch samples, most of which are assigned at high probability.
+
+
+Out of curiosity, take a look at the birds that are not BFAL:
+```{r}
+mix_assigned %>%
+  filter(indiv %in% c("11-0626",
+"11-0628",
+"16-0412",
+"16-0413",
+"19-0314",
+"12-0369",
+"17-0268"))
+
+```
+
 
 ```{r}
 mix_assigned %>%
