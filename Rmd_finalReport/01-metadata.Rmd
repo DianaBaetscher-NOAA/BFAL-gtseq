@@ -1,0 +1,157 @@
+---
+title: "01-metadata"
+author: "Diana Baetscher"
+date: "2023-03-30"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+30 March 2023
+
+
+Cleaning up final set of metadata before R&R final report and passing off this repo to Jessie.
+
+
+## Metadata for bycatch and reference samples
+
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(readxl)
+
+```
+
+Metadata from Jessie for the bycatch and banded bycatch birds
+```{r fix-up-the-new-metadata}
+# while I'm at it, let's clean up location info for this
+# add metadata to that based on sample id
+new_meta <- read_xlsx("../data/metadata/Oikonos_NOAA_BFAL_Metadata_updated 3.15.23.xlsx")
+
+
+# all possible location info syntax
+meta_fixed_locs <- new_meta %>%
+  #select(Location, `Loc-Abbr`) %>%
+  #unique() %>%
+   mutate(Location = ifelse(Location == "French Frigate Shoals (Tern Island)", "Tern Island, French Frigate Shoals, HI", Location)) %>%
+    mutate(Location = ifelse(Location == "Laysan Island", "Laysan Island, Honolulu County, Hawaii", Location)) %>%
+      mutate(Location = ifelse(Location == "Kure Attol (Green Island)", "Green Island, Kure Atoll, Honolulu County, Hawaii", Location)) %>%
+       mutate(`Loc-Abbr` = ifelse(Location == "Tern Island, French Frigate Shoals, HI", "NWHI, FFS", `Loc-Abbr`)) %>%
+        mutate(`Loc-Abbr` = ifelse(Location == "Laysan Island, Honolulu County, Hawaii", "NWHI, Laysan", `Loc-Abbr`)) %>%
+          mutate(`Loc-Abbr` = ifelse(Location == "French Frigate Shoals", "NWHI, FFS", `Loc-Abbr`)) %>%
+            mutate(`Loc-Abbr` = ifelse(Location == "Green Island, Kure Atoll, Honolulu County, Hawaii", "NWHI, Kure", `Loc-Abbr`)) %>%
+   unique() #%>% # there are three metadata entries that are exact duplicates. Remove those here
+  # arrange(Location)
+
+```
+846 bycatch, some of which were banded and used as reference birds
+
+
+
+Metadata from the reference birds (non-banded)
+
+```{r}
+# from the MiSeq sample sheet
+ref_samplelist <- read_csv("../data/gtseq5_samplelist.csv") %>%
+  mutate(gtseq_run = "gtseq5") %>%
+  rename(id = sample)
+
+# metadata for reference samples used for lcWGS
+ref_pops <- readxl::read_xlsx("../data/BFAL_WGS_01_finalPlateMap.xlsx", sheet = "combinedPlate1And2SamplePops") %>%
+  mutate(reference = TRUE) %>%
+  rename(sampleID = ind_ID)
+  
+
+
+reference_meta_wo_banded <- ref_pops %>%
+  left_join(., ref_samplelist, by = c("sampleID" = "Sample_ID")) %>%
+  filter(str_detect(sampleID, "BFAL-")) %>% # just the reference samples that came from non-Jessie sources (not banded birds)
+  rename(Location = population) %>%
+  mutate(Location = ifelse(Location == "Kure", "Kure Atoll, Honolulu County, Hawaii", Location)) %>%
+   mutate(Location = ifelse(Location == "Midway", "Midway Atoll, NWHI, HI", Location)) %>%
+      mutate(Location = ifelse(Location == "Torishima", "Torishima Island, Japan", Location)) %>%
+       mutate(`Loc-Abbr` = ifelse(Location == "Midway Atoll, NWHI, HI", "NWHI, Midway", NA)) %>%
+        mutate(`Loc-Abbr` = ifelse(Location == "Torishima Island, Japan", "Japan, Torishima", `Loc-Abbr`)) %>%
+            mutate(`Loc-Abbr` = ifelse(Location == "Kure Atoll, Honolulu County, Hawaii", "NWHI, Kure", `Loc-Abbr`)) 
+  
+reference_meta_wo_banded
+```
+92 reference samples without banded birds.
+
+
+
+## Samplesheets
+
+Now organize the sample info associated with the birds we genotyped at ABL
+```{r}
+#create a list of the files from your target directory
+file_list <- list.files(path="../data/samplesheets/")
+
+#initiate a blank data frame, each iteration of the loop will append the data from the given file to this variable
+samplesheets <- data.frame()
+
+# read in sample sheets
+for (i in 1:length(file_list)){
+  temp_data <- read_csv(paste0("../data/samplesheets/",file_list[i]), skip = 19) #read in files using the fread function from the data.table package
+  samplesheets <- rbindlist(list(samplesheets, temp_data), use.names = T) #for each iteration, bind the new data to the building dataset
+}
+
+samplesheets1 <- samplesheets %>%
+  rename(id = s_number, gtseq_run = Description) 
+
+
+
+samplesheets1$Sample_ID <- gsub("_", "-", samplesheets1$Sample_ID)
+samplesheets1$Sample_ID <- gsub("banded", "", samplesheets1$Sample_ID)
+
+samplesheets2 <- samplesheets1 %>%  # one ID to fix based on Claire's description of mislabeling
+  mutate(Sample_ID = ifelse(Sample_ID == "BFAL08-1144", "BFAL08-1844", Sample_ID)) %>%
+  mutate(Sample_ID = ifelse(Sample_ID == "BFAL11-0293-reference", "BFAL11-0293", Sample_ID)) %>%
+  mutate(Sample_ID = ifelse(Sample_ID %in% c("BFAL19-0164a", "BFAL19-0164b"), "BFAL19-0164", Sample_ID))
+
+
+# How many of those IDs are unique?
+
+# just the BFAL samples that are part of the bycatch metadata from Jessie
+bycatch_samplesheet <- samplesheets2 %>%
+  filter(!str_detect(Sample_ID, "NTC"),
+         !str_detect(Sample_ID, "DY"),
+         !str_detect(Sample_ID, "blank"),
+         !str_detect(Sample_ID, "KURE"),
+         !str_detect(Sample_ID, "PCMB"),
+         !str_detect(Sample_ID, "TOR")) %>%
+  rename(sampleID = Sample_ID)
+
+# Add info about which bycatch samples are in the reference panel?
+bycatch_samplesheet_data <- bycatch_samplesheet %>%
+  left_join(., ref_pops)
+
+# fix the sample IDs to match the metadata
+bycatch_samplesheet_data$sampleID <- gsub("BFAL", "", bycatch_samplesheet_data$sampleID)
+
+# these should now match up with Jessie's metadata for bycatch
+bycatch_samplesheet_data 
+
+```
+
+
+
+
+```{r combine-bycatch-and-reference-metadata}
+ full_metadata_all_samples <- bycatch_samplesheet_data %>%
+  full_join(., meta_fixed_locs, by = c("sampleID" = "MWVCRC#")) %>%
+  bind_rows(., reference_meta_wo_banded) %>%
+  select(-I7_Index_ID, -index, -I5_Index_ID, -index2, -Sample_Project) %>%
+  rename(population = pop)
+
+full_metadata_all_samples %>%
+  write_rds("../data/processed/metadata_bycatch_and_reference_20230330.rds")
+
+```
+
+Because some samples were genotyped multiple times, I'll have the same metadata entry match multiple samplesheet entries.
+

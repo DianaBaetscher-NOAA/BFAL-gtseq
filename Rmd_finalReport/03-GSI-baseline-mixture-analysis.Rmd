@@ -1,20 +1,20 @@
 ---
-title: "14-filtered-baseline-mix-analysis"
+title: "03-GSI-baseline-mixture-analysis"
 author: "Diana Baetscher"
-date: "2023-03-22"
-output: github_document
+date: "2023-03-30"
+output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-22 March 2023
+## Genetic stock identification
 
-This is an updated version of `11-hwe-filtered...`
+Baseline evaluation and mixture assignment
 
 
-This relies on the locus evaluation in `10-locus-summary-and-eval.Rmd` and the initial analysis in `09-reference-baseline-mixture-analysis.Rmd`.
+This relies on the locus evaluation in `02-locus-HWE-evaluation.Rmd`.
 
 Implementing the functions for reading in genos from the rds files created by microhaplot.
 
@@ -24,7 +24,7 @@ The R function uses a minimum read depth of 10 reads for the first allele and 6 
 
 The VCF file used to generate these rds files is `BFAL_reference_filtered.vcf`, currently on Sedna. I might return to this by merging additional samples into that VCF file, but those would be bycatch - not reference samples - and the benefit to doing so is uncertain.
 
-Read in the `loci_to_toss_hwe.csv` file and then everything should be straightforward and ported from the prior analysis.
+Read in the `loci_to_keep_hwe.csv` file and then everything should be straightforward and ported from the prior analysis.
 
 
 ```{r load-libraries}
@@ -38,16 +38,14 @@ library(rubias)
 
 
 
-
 ```{r}
 # remove the loci that had deviations from HWE in the majority of populations
 loci_to_keep <- read_csv("csv_outputs/loci_to_keep_hwe.csv")
 
-# read in the metadata attached to the genotypes - NOTE, this doesn't preserve the NAs explicitly!!
-genos <- read_rds("../data/processed/genos_w_metadata_samplesheets.rds") %>%
-  inner_join(., loci_to_keep) %>%
-  rename(sampleID = Sample_ID) 
-unq_samples <- genos %>%
+# read in the metadata 
+meta <- read_rds("../data/processed/metadata_bycatch_and_reference_20230330.rds") 
+
+unq_samples <- meta %>%
   select(sampleID, population, reference, gtseq_run, id, Location) %>%
   unique
 
@@ -68,6 +66,7 @@ ref_pops <- genos_long %>%
 
 genos_long %>% head()
 ```
+
 
  ## Some initial filters
 
@@ -115,9 +114,8 @@ geno_one_each %>%
   filter(!is.na(sampleID)) %>%
   select(sampleID) %>%
   unique()
-```
-961 unique samples
 
+```
 
 ```{r}
 # try using this df to eliminate issues with duplication
@@ -156,6 +154,7 @@ genos_no_dups %>%
   
 ```
 
+
 458 alleles across 182 loci with between 1-8 alleles per locus.
 
 quick look at the loci with only 1 allele:
@@ -177,6 +176,8 @@ polymorphic_no_dups <- genos_no_dups %>%
   anti_join(., monomorphic)
 
 ```
+
+
 I might as well get rid of the monomorphic loci, no?
 
 
@@ -203,6 +204,7 @@ genos_locs_filtered <- polymorphic_no_dups %>%
   anti_join(., locs_to_toss)
 
 ```
+
 Drop 3 loci with > 50% missing data.
 
 That brings the number of loci down to 168. (11 were monomorphic)
@@ -316,32 +318,45 @@ ref_two_col <- reference %>%
 
 ```
 
+## self-assignment
 
+Doing a sanity check with the reference baseline
 
 ```{r}
-# self-assignment
-#baseline_assign <- rubias::self_assign(ref_two_col, gen_start_col = 5)
+# first make integers of the alleles
+alle_idxs <- genos_locs_ind_filtered %>% 
+  filter(!is.na(sampleID)) %>%
+  dplyr::select(sampleID, locus, gene_copy, allele) %>%
+  group_by(locus) %>%
+  mutate(alleidx = as.integer(factor(allele, levels = unique(allele)))) %>%
+  ungroup() %>%
+  arrange(sampleID, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
 
 ```
 
+## get the allele indexes for just the reference populations
+
+
 ```{r}
-# top_assign <- baseline_assign %>%
-#   group_by(indiv) %>%
-#   slice_max(., order_by = scaled_likelihood) 
-# 
-# top_assign %>%
-#   ggplot(aes(z_score)) +
-#   geom_histogram()
-# 
-# top_assign %>%
-#   filter(z_score < -5)
+# format for rubias
+reference <- alle_idxs %>%
+  inner_join(., ref_pops) %>%
+  select(-allele, -Location) %>%
+  select(population, sampleID, everything()) %>%
+  rename(collection = population, indiv = sampleID)
+
+# make two-col format
+ref_two_col <- reference %>%
+  unite("loc", 3:4, sep = ".") %>%
+  pivot_wider(names_from = loc, values_from = alleidx) %>%
+  mutate(repunit = collection) %>%
+  mutate(sample_type = "reference") %>%
+  select(sample_type, repunit, collection, everything()) %>% # modify repunit info for Whale-Skate and Tern, which should be a single repunit for the French Frigate Shoals
+  mutate(repunit = ifelse(collection %in% c("Tern", "Whale-Skate"), "FFS", repunit)) %>%
+  filter(repunit != "Lehua") %>%
+  filter(indiv != "21-0173") # remove the z-score outlier from the self-assignment (Laysan bird)
+
 ```
-
-Based on the self-assignment, remove the z-score outlier (implemented above)
-
-
-
-
 
 A little background here:
 
@@ -397,8 +412,6 @@ ggplot(AW_resum, aes(x = repu_n_prop, # Prop of ind. actually simulated
 
 ```
 
-
-
 At the individual level...
 
 ```{r}
@@ -434,9 +447,6 @@ ggsave("pdf_outputs/LOO_indiv_posteriors90.pdf", width = 8, height = 5)
 
 ```
 
-
-
-
 ## Mixture bycatch assignment
 
 
@@ -461,7 +471,31 @@ mix_idx %>%
 
 tmp <- mix_idx %>%
   filter(!indiv %in% c("11-0293", "19-0164"))
+
 ```
+
+investigating those samples, quickly
+```{r}
+meta %>%
+  filter(sampleID %in% c("11-0293", "19-0164"))
+```
+Both were genotyped twice, but that should have been taken care of with the genos_one_each function... unless there were mismatched genotypes?
+
+```{r}
+genos_long %>%
+  filter(sampleID %in% c("19-0164")) %>%
+  filter(locus == "scaffold_185_1154507")
+
+```
+
+```{r}
+genos_long %>%
+  filter(sampleID == "11-0293",
+         locus %in% c("scaffold_1589_18141", "scaffold_306_328368", "scaffold_7_15896")) %>%
+  arrange(locus)
+```
+Ok, so the issue here is that in each case, the allele and gene copies are switched. So we just need to take one of the entries and remove the other earlier on.
+
 
 
 ```{r}
@@ -509,6 +543,7 @@ mix_assigned %>%
   geom_histogram()
 
 ```
+
 766 bycatch birds (this is the 961-65 with missing data, -129 in the reference populations)
 
 what % of that assigned at >90% PofZ?
@@ -522,6 +557,7 @@ mix_assigned %>%
 600/766
 
 ```
+
 78% of bycatch assigned at >90%
 
 ```{r}
@@ -532,7 +568,6 @@ mix_assigned %>%
 
 ```
 
-
 The birds that are out past 8 are almost certainly not from one of our breeding colonies
 
 ```{r}
@@ -540,6 +575,7 @@ mix_assigned %>%
   filter(z_score < -5)
 
 ```
+
 All of the birds with low z-scores look like they're closest to Laysan.
 
 ```{r}
@@ -585,87 +621,3 @@ bycatch_assignments %>%
 ```{r}
 banded_birds <- read_csv("csv_outputs/BFAL_bycatch_assignments_20230323.csv")
 ```
-
-```{r}
-banded_birds %>%
-  filter(`BandY/N` == TRUE &
-           !is.na(population) &
-           !is.na(mixture_collection) &
-           PofZ > 0.9) %>%
-  group_by(`Loc-Abbr`, repunit) %>%
-  tally()
-
-```
-
-```{r}
-# How many "misassignments" in the banded birds?
-banded_no_pop <- banded_birds %>%
-  filter(`BandY/N` == TRUE,
-         !is.na(mixture_collection),
-         is.na(population))
-
-```
-
-137 banded birds
-
-There are duplicates because of issues with the metadata/population labels... but those are all reference birds anyway.
-
-79 banded birds that were not a part of the reference.
-14 of those have no population information.
-65 with location information
-
-
-
-
-
-```{r fix-up-the-new-metadata}
-# while I'm at it, let's clean up location info for this
-# add metadata to that based on sample id
-new_meta <- read_xlsx("../data/metadata/Oikonos_NOAA_BFAL_Metadata_updated 3.15.23.xlsx")
-
-
-# all possible location info syntax
-meta_fixed_locs <- new_meta %>%
-  #select(Location, `Loc-Abbr`) %>%
-  #unique() %>%
-   mutate(Location = ifelse(Location == "French Frigate Shoals (Tern Island)", "Tern Island, French Frigate Shoals, HI", Location)) %>%
-    mutate(Location = ifelse(Location == "Laysan Island", "Laysan Island, Honolulu County, Hawaii", Location)) %>%
-      mutate(Location = ifelse(Location == "Kure Attol (Green Island)", "Green Island, Kure Atoll, Honolulu County, Hawaii", Location)) %>%
-       mutate(`Loc-Abbr` = ifelse(Location == "Tern Island, French Frigate Shoals, HI", "NWHI, FFS", `Loc-Abbr`)) %>%
-        mutate(`Loc-Abbr` = ifelse(Location == "Laysan Island, Honolulu County, Hawaii", "NWHI, Laysan", `Loc-Abbr`)) %>%
-          mutate(`Loc-Abbr` = ifelse(Location == "French Frigate Shoals", "NWHI, FFS", `Loc-Abbr`)) %>%
-            mutate(`Loc-Abbr` = ifelse(Location == "Green Island, Kure Atoll, Honolulu County, Hawaii", "NWHI, Kure", `Loc-Abbr`)) #%>%
-  # unique() %>%
-  # arrange(Location)
-
-
-```
-
-Quick look at the metadata to confirm that the population information didn't get stripped off accidentally.
-```{r}
-banded_no_pop %>%
-  left_join(., meta_fixed_locs, by = c("sampleID" = "MWVCRC#"))
-
-
-```
-Confirmed. No location info for those birds.
-
-
-```{r}
-banded_birds %>%
-  filter(`BandY/N` == TRUE,
-          !is.na(population) &
-           !is.na(mixture_collection) &
-           PofZ > 0.9 &
-           is.na(`Loc-Abbr`)) 
-
-
-
-%>%
-  ggplot(aes(x = `Loc-Abbr`, fill = repunit)) +
-  geom_bar(stat = "count")
-
-
-```
-
-

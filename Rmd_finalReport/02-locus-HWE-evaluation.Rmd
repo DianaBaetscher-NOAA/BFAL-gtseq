@@ -1,23 +1,27 @@
 ---
-title: "10-locus-summary-and-eval"
-output: html_notebook
+title: "02-locus-HWE-evaluation"
+author: "Diana Baetscher"
+date: "2023-03-30"
+output: html_document
 ---
 
-Update: 15 March 2023
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+Using the complete dataset to evaluate HWE across loci and populations in the baseline.
+
+
 
 Updates: use the NAs explicit genos file. 
 Don't filter loci based on missing data at this point. 
 Just look at reference pops for evaluating HWE.
 
 
-
-
-23 February 2023
-
 Evaluating the loci that we're using for self-assignment and bycatch assignment.
-
 These were originally derived from lcWGS data and the microhaplotype results suggest that the real variation present is potentially quite different.
-
 Initially, I should probably just focus on the baseline genotypes rather than including everything.
 
 
@@ -37,13 +41,14 @@ library(DescTools)
 genos_long <- read_rds("../data/processed/called_genos_na_explicit.rds")
 
 # just select the reference samples based on metadata
-samplesheets <- read_csv("../data/processed/full_metadata_w_samplesheet.csv")
+samplesheets <- read_rds("../data/processed/metadata_bycatch_and_reference_20230330.rds")
 
 reference_samples <- samplesheets %>%
   filter(Sample_Plate %in% c("BFAL001", "BFAL002") &
-           !is.na(Location)) %>%
-  arrange(Sample_ID) %>%
-  select(Sample_ID, gtseq_run, id, Location, `Loc-Abbr`)
+           !is.na(Location),
+         !`Loc-Abbr` %in% c("Oahu", "Kauai, Kilauea")) %>%
+  arrange(sampleID) %>%
+  select(sampleID, gtseq_run, id, Location, `Loc-Abbr`)
 
 # combine the genotypes with the reference
 ref_genos <- reference_samples %>%
@@ -76,11 +81,11 @@ tdepth <- function(a, d) {
 }
 # this takes the highest read-depth instance of each duplicately-genotyped individual.
 geno_one_each <- ref_genos %>%
-  group_by(Sample_ID, locus, gtseq_run) %>%
+  group_by(sampleID, locus, gtseq_run) %>%
   mutate(total_depth = tdepth(allele, depth)) %>%
   ungroup() %>%
-  arrange(Sample_ID, locus, total_depth, gtseq_run, depth) %>%
-  group_by(Sample_ID, locus) %>%
+  arrange(sampleID, locus, total_depth, gtseq_run, depth) %>%
+  group_by(sampleID, locus) %>%
   mutate(rank = 1:n()) %>% # this ranks all alleles for a given individual by depth
   ungroup() %>%
   filter(rank <= 2) # this takes the top ranked alleles and should remove duplicates
@@ -88,22 +93,25 @@ geno_one_each <- ref_genos %>%
 
 # how many samples now?
 geno_one_each %>%
-  filter(!is.na(Sample_ID)) %>%
-  group_by(Sample_ID) %>% 
-  select(Sample_ID, gtseq_run, id) %>%
+  filter(!is.na(sampleID)) %>%
+  group_by(sampleID) %>% 
+  select(sampleID, gtseq_run, id) %>%
   unique() %>%
   tally() 
 
 ```
 
 
+
 Take a look at missing data overall:
 ```{r}
 geno_one_each %>%
-  ggplot(aes(x = reorder(locus, depth), y = reorder(Sample_ID, depth), fill = log10(depth))) +
+  ggplot(aes(x = reorder(locus, depth), y = reorder(sampleID, depth), fill = log10(depth))) +
   geom_tile()
 
 ```
+
+
 Deal with missing data:
 
 
@@ -127,6 +135,8 @@ geno_one_each %>%
   arrange(desc(n))
 
 ```
+
+
 In the reference, 458 alleles across 189 loci with 1-6 alleles per locus.
 
 Some individuals are missing all their data, and some loci are missing all their data.
@@ -147,6 +157,8 @@ genos_locs_filtered <- geno_one_each %>%
 
 
 ```
+
+
 Remove these 4 loci because of too much missing data in the reference samples.
 
 
@@ -158,7 +170,7 @@ Total number of samples = 151
 
 ```{r}
 inds_to_toss <- genos_locs_filtered %>%
-  group_by(Sample_ID) %>%
+  group_by(sampleID) %>%
   mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
   summarise(sum(missingness)) %>%
   arrange(desc(`sum(missingness)`)) %>%
@@ -170,17 +182,18 @@ genos_locs_ind_filtered <- genos_locs_filtered %>%
   anti_join(., inds_to_toss)
 
 ```
-26 samples removed with >10% missing data.
+23 samples removed with >10% missing data.
 
 
 
 Now look at missing data:
 ```{r}
 genos_locs_ind_filtered %>%
-  ggplot(aes(x = reorder(locus, -depth), y = reorder(Sample_ID, -depth), fill = log10(depth))) +
+  ggplot(aes(x = reorder(locus, -depth), y = reorder(sampleID, -depth), fill = log10(depth))) +
   geom_tile()
 
 ```
+
 Much better. Now move forward from here.
 
 
@@ -190,19 +203,19 @@ Much better. Now move forward from here.
 ```{r}
 # first make integers of the alleles
 alle_idxs <- genos_locs_ind_filtered %>% 
-  filter(!is.na(Sample_ID)) %>%
-  dplyr::select(Sample_ID, locus, gene_copy, allele) %>%
+  filter(!is.na(sampleID)) %>%
+  dplyr::select(sampleID, locus, gene_copy, allele) %>%
   group_by(locus) %>%
   mutate(alleidx = as.integer(factor(allele, levels = unique(allele)))) %>%
   ungroup() %>%
-  arrange(Sample_ID, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
+  arrange(sampleID, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
 
 # reformat
 reference <- alle_idxs %>%
   inner_join(., reference_samples) %>%
   select(-allele, -gtseq_run, -id) %>%
-  select(`Loc-Abbr`, Sample_ID, everything()) %>%
-  rename(collection = `Loc-Abbr`, indiv = Sample_ID)
+  select(`Loc-Abbr`, sampleID, everything()) %>%
+  rename(collection = `Loc-Abbr`, indiv = sampleID)
 
 
 ```
@@ -214,10 +227,6 @@ I need to finagle the dataset into a genind object.
 # read in data
 reference_genos <- reference
 
-```
-
-Check on missing data:
-```{r}
 # number of missing alleles (max = 185*2)
 inds_to_toss_missing_data <- reference_genos %>%
   group_by(indiv) %>%
@@ -237,6 +246,7 @@ reference_genos %>%
   tally()
 
 ```
+
 I feel fine about that. Let's see if that makes any of the HWE calculations easier because less missing data?
 
 ```{r}
@@ -308,6 +318,7 @@ df_for_conversion %>%
   tally()
 
 ```
+
 Let's remove Lehua and Kilauea at this point because of so few samples.
 
 ```{r}
@@ -354,7 +365,6 @@ Hobs <- t(sapply(seppop(genind_df), function(ls) summary(ls)$Hobs))
   
 ```
 
-
 ```{r}
 par(mar=c(5.5, 4.5, 1, 1))
   Hobs.pop <- apply(Hobs, MARGIN = 1, FUN = mean)
@@ -362,12 +372,7 @@ par(mar=c(5.5, 4.5, 1, 1))
   barplot(Hexp.pop, ylim=c(0,1), las=3, ylab="Expected heterozygosity")
   barplot(Hobs.pop, ylim=c(0,1), las=3, ylab="Observed heterozygosity")
 ```
-```{r}
-#install.packages("PopGenReport")
 
-# Richness <- PopGenReport::allel.rich(genind_df, min.alleles = NULL)
-# Richness$alleles.sampled
-```
 
 
 ```{r}
@@ -381,6 +386,7 @@ as.tibble(bfal_diversity) %>%
   #write_csv("csv_outputs/reference_pop_hz_summary.csv")
 
 ```
+
 chi^2: value of the classical chi-squared test statistic
 df: degrees of freedom of the chi-squared test
 Pr(chi^2 >): p-value of the chi-squared test (‘>’ indicates that the alternative is ‘greater,’ which is always the case for a chi-squared test)
@@ -399,7 +405,8 @@ rownames_to_column(data.frame(hwe_output)) %>%
   filter(Pr.exact < 0.01)
 
 ```
-27 loci that are out of HWE globally. (included is the funky one, scaffold_75_1184494) [31 with the missing data indivs removed from the baseline]
+
+28 loci that are out of HWE globally.
 
 After looking at the loci x population HWE info, I can remove any that are out of HWE in the majority of populations.
 
@@ -444,156 +451,3 @@ loci_to_keep %>%
   write_csv("csv_outputs/loci_to_keep_hwe.csv")
 # from here, I can generate a "final" dataset.
 ```
-
-Pivoting to a new Rmd `11-hwe-filtered-baseline-and-mixture.Rmd`.
-
-
-
-
-
-
-```{r}
-# Monte Carlo: p-value
-HWE.test <- data.frame(sapply(seppop(genind_df), 
-                              function(ls) pegas::hw.test(ls, B=1000)[,4]))
-HWE.test.MC <- t(data.matrix(HWE.test))
-{cat("MC permuation test (p-values):", "\n")
-round(HWE.test.MC,3)}
-```
-
-
-```{r}
-alpha=0.05
-Prop.loci.out.of.HWE <- data.frame(Chisq=apply(HWE.test.chisq<alpha, 2, mean), 
-           MC=apply(HWE.test.MC<alpha, 2, mean))
-
-Prop.loci.out.of.HWE
-# seems like the MC is less conservative, but when MC is 0.2, Chisq is at least that
-
-Prop.loci.out.of.HWE %>%
-  filter(MC > 0) # 19 loci according to MC; actually 2 instances where Chisq doesn't pick it up
-
-```
-
-```{r}
-data.frame(Chisq=apply(HWE.test.chisq<alpha, 1, mean))
-
-data.frame(HWE.test.chisq)
-```
-
-
-```{r}
-Prop.pops.out.of.HWE <- data.frame(Chisq=apply(HWE.test.chisq<alpha, 1, mean), 
-           MC=apply(HWE.test.MC<alpha, 1, mean))
-
-Prop.pops.out.of.HWE   
-```
-Check what's going on here (above).
-
-
-```{r}
-Chisq.fdr <- matrix(p.adjust(HWE.test.chisq,method="fdr"), 
-                    nrow=nrow(HWE.test.chisq))
-MC.fdr <- matrix(p.adjust(HWE.test.MC, method="fdr"), 
-                    nrow=nrow(HWE.test.MC))
-
-Prop.pops.out.of.HWE <- data.frame(Chisq=apply(HWE.test.chisq<alpha, 1, mean), 
-           MC=apply(HWE.test.MC<alpha, 1, mean),
-           Chisq.fdr=apply(Chisq.fdr<alpha, 1, mean),
-           MC.fdr=apply(MC.fdr<alpha, 1, mean))
-Prop.pops.out.of.HWE             
-```
-
-Correct for the number of tests:
-```{r}
-Chisq.fdr <- matrix(p.adjust(HWE.test.chisq,method="fdr"), 
-                    nrow=nrow(HWE.test.chisq))
-MC.fdr <- matrix(p.adjust(HWE.test.MC, method="fdr"), 
-                    nrow=nrow(HWE.test.MC))
-
-Prop.pops.out.of.HWE <- data.frame(Chisq=apply(HWE.test.chisq<alpha, 1, mean), 
-           MC=apply(HWE.test.MC<alpha, 1, mean),
-           Chisq.fdr=apply(Chisq.fdr<alpha, 1, mean),
-           MC.fdr=apply(MC.fdr<alpha, 1, mean))
-Prop.pops.out.of.HWE             
-```
-
-
-
-
-
-
-
-### PCA
-
-
-Now that the data is a genind object, go ahead and run the PCA.
-
-Make PCA
-```{r dataset-pca}
-# Allele presence absence data are extracted and NAs replaced using tab:
-datasetX <- tab(genind_df, NA.method="mean") # double check that is this the appropriate method.
-
-# make PCA
-dataset_pca1 <- dudi.pca(datasetX, center = TRUE, scannf = FALSE, scale=FALSE, nf = 1000)
-
-# colors
-mycol <- colorRampPalette(c("deepskyblue", "darkgreen", "brown", "midnightblue", "darkcyan", "slateblue", "purple4"))(6)
-
-# plot with factor labels
-pdf("pdf_outputs/BFALgtseq_reference_filtered_genos_pca.pdf", width = 10, height = 10)
-s.class(dataset_pca1$li, fac=pop(genind_df), wt = rep(1, length(pop(genind_df))), clabel = .8, grid = FALSE, cellipse = 2,
-        xax=1, yax=2, col=transp(mycol,.8),
-        axesel=FALSE, cstar=0, cpoint=1)
-dev.off()
-
-```
-
-
-Out of curiosity, filter the genind to remove Torishima and then re-run the PCA with just the Hawaiian colonies.
-
-```{r}
-# remove Torishima for test PCA
-convert_wo_3pops <- convert_df_wo_2pops %>%
-  filter(STRATA != "Torishima")
-
-# use the radiator package for this conversion
-genind_wo_Torishima <- write_genind(convert_wo_3pops)
-
-
-# Allele presence absence data are extracted and NAs replaced using tab:
-dataset_wo_Tor <- tab(genind_wo_Torishima, NA.method="mean") # double check that is this the appropriate method.
-
-# make PCA
-dataset_wo_Tor1 <- dudi.pca(dataset_wo_Tor, center = TRUE, scannf = FALSE, scale=FALSE, nf = 1000)
-
-# colors
-mycol <- colorRampPalette(c("deepskyblue", "darkgreen", "brown", "midnightblue", "darkcyan", "slateblue", "purple4"))(6)
-
-# plot with factor labels
-pdf("pdf_outputs/BFALgtseq_reference_filtered_genos_pca_wo_Torishisma.pdf", width = 10, height = 10)
-s.class(dataset_wo_Tor1$li, fac=pop(genind_wo_Torishima), wt = rep(1, length(pop(genind_wo_Torishima))), clabel = .8, grid = FALSE, cellipse = 2,
-        xax=1, yax=2, col=transp(mycol,.8),
-        axesel=FALSE, cstar=0, cpoint=1)
-dev.off()
-```
-
-
-
-## Check on a few of the multi-hap loci from test 5
-
-These looks funky: 
-scaffold_75_1184494
-scaffold_7_15896
-
-These are also two loci that came up as out of HWE. Perfect. I'll remove them and the other loci that had HWE issues across the majority of pops.
-
-
-```{r}
-reference_genos %>%
-  filter(locus %in% c("scaffold_7_15896", "scaffold_75_1184494"))
-
-
-```
-
-

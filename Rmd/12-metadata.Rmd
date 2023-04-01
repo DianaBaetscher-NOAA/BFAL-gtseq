@@ -1,6 +1,6 @@
 ---
 title: "metadata"
-output: html_notebook
+output: rmarkdown::github_document
 ---
 
 27 February 2023
@@ -12,6 +12,7 @@ Organizing the metadata - linking the MiSeq run sample sheet to the Oikonos meta
 ```{r}
 library(tidyverse)
 library(data.table)
+library(readxl)
 
 # read in metadata from Oikonos
 meta <- read_csv("../data/metadata/Oikonos_BFAL_Metadata_12.21.2022.csv") %>%
