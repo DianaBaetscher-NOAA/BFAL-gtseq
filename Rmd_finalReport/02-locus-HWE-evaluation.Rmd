@@ -2,7 +2,7 @@
 title: "02-locus-HWE-evaluation"
 author: "Diana Baetscher"
 date: "2023-03-30"
-output: html_document
+output: github_document
 ---
 
 ```{r setup, include=FALSE}
