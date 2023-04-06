@@ -43,7 +43,8 @@ library(rubias)
 loci_to_keep <- read_csv("csv_outputs/loci_to_keep_hwe.csv")
 
 # read in the metadata 
-meta <- read_rds("../data/processed/metadata_bycatch_and_reference_20230330.rds") 
+meta <- read_rds("../data/processed/metadata_bycatch_and_reference_20230330.rds") %>%
+  filter(sampleID != "21-0252") # apparently this sample was not genotyped. Better to remove it here for accounting.
 
 unq_samples <- meta %>%
   select(sampleID, population, reference, gtseq_run, id, Location) %>%
@@ -91,10 +92,10 @@ tdepth <- function(a, d) {
 }
 # this takes the highest read-depth instance of each duplicately-genotyped individual.
 geno_one_each <- genos_long %>%
-  group_by(sampleID, locus, gtseq_run) %>%
+  group_by(sampleID, locus, gtseq_run, id) %>%
   mutate(total_depth = tdepth(allele, depth)) %>%
-  ungroup() %>%
-  arrange(sampleID, locus, total_depth, gtseq_run, depth) %>%
+  ungroup() %>% 
+  arrange(sampleID, locus, desc(total_depth), gtseq_run, depth) %>%
   group_by(sampleID, locus) %>%
   mutate(rank = 1:n()) %>% # this ranks all alleles for a given individual by depth
   ungroup() %>%
@@ -183,20 +184,16 @@ I might as well get rid of the monomorphic loci, no?
 
 Missing data:
 
-961 individuals * 2 alleles per locus = 1922 alleles per locus
-```{r}
-961*2
-```
+959 individuals * 2 alleles per locus
 
-
-50% missing data per locus = 961
+50% missing data per locus = 959
 ```{r}
 # missing data across loci
 locs_to_toss <- polymorphic_no_dups %>%
   group_by(locus) %>%
   mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
   summarise(sum(missingness)) %>% 
-  filter(`sum(missingness)`>961) %>% # more than 50% missing data
+  filter(`sum(missingness)`>959) %>% # more than 50% missing data
   select(locus) # drop those loci for now and see how the assignment goes
 
 # just the keepers
@@ -241,12 +238,10 @@ polymorphic_no_dups %>%
 Total number of loci = 168
 ```{r}
 168*2
-```
-```{r}
+
 336*0.25
 ```
 
-Total number of samples = 961
 
 ```{r}
 inds_to_toss <- genos_locs_filtered %>%
@@ -261,13 +256,13 @@ genos_locs_ind_filtered <- genos_locs_filtered %>%
   anti_join(., inds_to_toss)
 
 ```
-65 samples had >25% missing data
+63 samples had >25% missing data
 
 
 ```{r}
-65/961
+63/959
 ```
-6.7% of samples were dropped bec of missing data.
+6.6% of samples were dropped bec of missing data.
 
 Take a look at that dataset
 
@@ -365,8 +360,7 @@ Rather than using self-assignment, I need to look at the leave-one-out assessmen
 ## Leave one out assessment for the baseline
 
 ```{r}
-library(rubias) # for some reason this was throwing an error without loading the package explicitly here
-loo_output <- rubias::assess_reference_loo(ref_two_col, gen_start_col = 5, return_indiv_posteriors = T)
+loo_output <- assess_reference_loo(ref_two_col, gen_start_col = 5, return_indiv_posteriors = T)
 
 ```
 
@@ -447,6 +441,26 @@ ggsave("pdf_outputs/LOO_indiv_posteriors90.pdf", width = 8, height = 5)
 
 ```
 
+
+#### self-assignment to generate z-score distributions
+
+```{r}
+
+selfassigned <- rubias::self_assign(ref_two_col, gen_start_col = 5)
+
+selfassigned %>%
+  group_by(indiv) %>%
+  slice_max(., order_by = scaled_likelihood) %>%
+  ggplot(aes(x = z_score)) +
+  geom_histogram() +
+  facet_grid(rows = vars(repunit))
+  
+```
+
+Kind of a sad distribution with so few samples (Laysan, Midway), but at least they're all centered between -3 and 2.
+
+
+
 ## Mixture bycatch assignment
 
 
@@ -460,41 +474,17 @@ mix_idx <- alle_idxs %>%
   rename(indiv = sampleID) %>%
   unique()
 
+# confirming no duplicates that would prevent rubias from working
 mix_idx %>%
   unite("loc", 2:3, sep = ".") %>%
   dplyr::group_by(indiv, collection, loc) %>%
     dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
     dplyr::filter(n > 1L)
 
-# same issue??
-# remove those
-
-tmp <- mix_idx %>%
-  filter(!indiv %in% c("11-0293", "19-0164"))
+tmp <- mix_idx 
 
 ```
 
-investigating those samples, quickly
-```{r}
-meta %>%
-  filter(sampleID %in% c("11-0293", "19-0164"))
-```
-Both were genotyped twice, but that should have been taken care of with the genos_one_each function... unless there were mismatched genotypes?
-
-```{r}
-genos_long %>%
-  filter(sampleID %in% c("19-0164")) %>%
-  filter(locus == "scaffold_185_1154507")
-
-```
-
-```{r}
-genos_long %>%
-  filter(sampleID == "11-0293",
-         locus %in% c("scaffold_1589_18141", "scaffold_306_328368", "scaffold_7_15896")) %>%
-  arrange(locus)
-```
-Ok, so the issue here is that in each case, the allele and gene copies are switched. So we just need to take one of the entries and remove the other earlier on.
 
 
 
@@ -534,7 +524,7 @@ mix_assigned <- bycatch_assign$indiv_posteriors %>%
 
 # by repunit/collection
 mix_assigned %>%
-  group_by(collection) %>%
+  group_by(repunit) %>%
   tally()
 
 # distribution of PofZ for top assignments
@@ -544,21 +534,21 @@ mix_assigned %>%
 
 ```
 
-766 bycatch birds (this is the 961-65 with missing data, -129 in the reference populations)
+768 bycatch birds (this is the 959-63 with missing data, -129 in the reference populations)
 
 what % of that assigned at >90% PofZ?
 ```{r}
 mix_assigned %>%
   filter(PofZ >0.90) %>%
   group_by(repunit) %>%
-  tally()
-
-
-600/766
+  tally() 
 
 ```
+```{r}
+606/768
+```
 
-78% of bycatch assigned at >90%
+78.9% of bycatch assigned at >90%
 
 ```{r}
 mix_assigned %>%
@@ -570,13 +560,15 @@ mix_assigned %>%
 
 The birds that are out past 8 are almost certainly not from one of our breeding colonies
 
+
 ```{r}
 mix_assigned %>%
   filter(z_score < -5)
 
 ```
 
-All of the birds with low z-scores look like they're closest to Laysan.
+All of the birds with low z-scores look like they're closest to Laysan. None have a lot of missing loci... I wonder if there are some fixed differences?
+
 
 ```{r}
 # What about the rest of the distribution?
@@ -604,8 +596,8 @@ ggsave("pdf_outputs/assigned_bycatch_PofZ90.pdf")
 #   unique() %>%
 #   arrange(indiv)
 
-bycatch_assignments <- genos %>%
-  select(-locus, -gene_copy, -allele, -depth, -allele.balance, -gtseq_run, -id, -Sample_Plate) %>%
+bycatch_assignments <- meta %>%
+  select(-Sample_Plate, -Sample_Well, -gtseq_run, -id, -Sample_Plate) %>%
   left_join(., mix_assigned, by = c("sampleID" = "indiv")) %>%
   select(-missing_loci) %>%
   unique() %>%
@@ -614,10 +606,6 @@ bycatch_assignments <- genos %>%
 
 
 bycatch_assignments %>%
-  write_csv("csv_outputs/BFAL_bycatch_assignments_20230323.csv")
+  write_csv("csv_outputs/BFAL_bycatch_assignments_20230403.csv")
 ```
 
-
-```{r}
-banded_birds <- read_csv("csv_outputs/BFAL_bycatch_assignments_20230323.csv")
-```
