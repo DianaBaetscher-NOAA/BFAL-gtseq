@@ -2,11 +2,14 @@
 title: "03-GSI-baseline-mixture-analysis"
 author: "Diana Baetscher"
 date: "2023-03-30"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+load("03-intermed-outputs-for-md.RData")
 ```
 
 ## Genetic stock identification
@@ -34,6 +37,7 @@ library(stringr)
 library(lubridate)
 library(rubias)
 
+source("../R/rubias_MultChains.R")
 ```
 
 
@@ -43,7 +47,7 @@ library(rubias)
 loci_to_keep <- read_csv("csv_outputs/loci_to_keep_hwe.csv")
 
 # read in the metadata 
-meta <- read_rds("../data/processed/metadata_bycatch_and_reference_20230330.rds") %>%
+meta <- read_rds("../data/processed/metadata_bycatch_and_reference_20230418.rds") %>%
   filter(sampleID != "21-0252") # apparently this sample was not genotyped. Better to remove it here for accounting.
 
 unq_samples <- meta %>%
@@ -64,8 +68,16 @@ ref_pops <- genos_long %>%
   select(sampleID, population, Location) %>%
   unique()
 
-
 genos_long %>% head()
+# output a list of sample IDs for jessie to check.
+# genos_NA_explicit %>%
+#   select(gtseq_run, id) %>%
+#   unique() %>%
+#   left_join(., bycatch_samplesheet_data) %>%
+#   filter(!is.na(sampleID)) %>%
+#   select(sampleID) %>%
+#   unique() %>%
+#   write_csv("csv_outputs/bycatch_sample_list_20230414.csv")
 ```
 
 
@@ -256,7 +268,7 @@ genos_locs_ind_filtered <- genos_locs_filtered %>%
   anti_join(., inds_to_toss)
 
 ```
-63 samples had >25% missing data
+62 samples had >25% missing data
 
 
 ```{r}
@@ -273,11 +285,14 @@ genos_locs_ind_filtered  %>%
 
 ```
 
-## self-assignment
+
+
+## Leave-one-out assignment of source populations
+
 
 Doing a sanity check with the reference baseline
 
-```{r}
+```{r format-reference-baseline-for-rubias}
 # first make integers of the alleles
 alle_idxs <- genos_locs_ind_filtered %>% 
   filter(!is.na(sampleID)) %>%
@@ -287,12 +302,9 @@ alle_idxs <- genos_locs_ind_filtered %>%
   ungroup() %>%
   arrange(sampleID, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
 
-```
 
 ## get the allele indexes for just the reference populations
 
-
-```{r}
 # format for rubias
 reference <- alle_idxs %>%
   inner_join(., ref_pops) %>%
@@ -313,59 +325,35 @@ ref_two_col <- reference %>%
 
 ```
 
-## self-assignment
-
-Doing a sanity check with the reference baseline
-
-```{r}
-# first make integers of the alleles
-alle_idxs <- genos_locs_ind_filtered %>% 
-  filter(!is.na(sampleID)) %>%
-  dplyr::select(sampleID, locus, gene_copy, allele) %>%
-  group_by(locus) %>%
-  mutate(alleidx = as.integer(factor(allele, levels = unique(allele)))) %>%
-  ungroup() %>%
-  arrange(sampleID, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
-
-```
-
-## get the allele indexes for just the reference populations
 
 
-```{r}
-# format for rubias
-reference <- alle_idxs %>%
-  inner_join(., ref_pops) %>%
-  select(-allele, -Location) %>%
-  select(population, sampleID, everything()) %>%
-  rename(collection = population, indiv = sampleID)
 
-# make two-col format
-ref_two_col <- reference %>%
-  unite("loc", 3:4, sep = ".") %>%
-  pivot_wider(names_from = loc, values_from = alleidx) %>%
-  mutate(repunit = collection) %>%
-  mutate(sample_type = "reference") %>%
-  select(sample_type, repunit, collection, everything()) %>% # modify repunit info for Whale-Skate and Tern, which should be a single repunit for the French Frigate Shoals
-  mutate(repunit = ifelse(collection %in% c("Tern", "Whale-Skate"), "FFS", repunit)) %>%
-  filter(repunit != "Lehua") %>%
-  filter(indiv != "21-0173") # remove the z-score outlier from the self-assignment (Laysan bird)
 
-```
+
 
 A little background here:
 
 Rather than using self-assignment, I need to look at the leave-one-out assessment because I know that doing self-assignment with my reference being identical to my ascertainment samples is going to be upwardly biased.
 
+
+
 ## Leave one out assessment for the baseline
 
-```{r}
-loo_output <- assess_reference_loo(ref_two_col, gen_start_col = 5, return_indiv_posteriors = T)
+
+
+```{r loo-output, eval=FALSE}
+loo_output <- rubias::assess_reference_loo(ref_two_col, gen_start_col = 5, return_indiv_posteriors = T)
+
+
+ref_two_col %>%
+  group_by(repunit) %>%
+  tally()
 
 ```
 
-```{r}
-AW_resum<-loo_output$mixing_proportions %>%
+
+```{r plot-results-from-LOO}
+BFAL_resum<-loo_output$mixing_proportions %>%
   group_by(iter, repunit) %>%
   summarise(true_repprop = sum(true_pi), 
             reprop_posterior_mean = sum(post_mean_pi),
@@ -373,7 +361,7 @@ AW_resum<-loo_output$mixing_proportions %>%
   mutate(repu_n_prop = repu_n / sum(repu_n))%>%
   mutate(Diff = reprop_posterior_mean - repu_n_prop)
 
-ggplot(AW_resum, aes(x = repu_n_prop, # Prop of ind. actually simulated 
+ggplot(BFAL_resum, aes(x = repu_n_prop, # Prop of ind. actually simulated 
                      y = reprop_posterior_mean, #inferred proportion
                      colour = repunit)) +
   geom_point(alpha = 0.7) +
@@ -388,8 +376,8 @@ ggsave("pdf_outputs/LOO_simulated_proportions_group.pdf", width = 10, height = 5
 ```
 
 
-```{r}
-ggplot(AW_resum, aes(x = repu_n_prop, # Prop of ind. actually simulated 
+```{r plot-diff-between-simulated-and-inferred}
+ggplot(BFAL_resum, aes(x = repu_n_prop, # Prop of ind. actually simulated 
                      y = Diff, #inferred proportion
                      colour = repunit)) +
   geom_point() +
@@ -408,18 +396,14 @@ ggplot(AW_resum, aes(x = repu_n_prop, # Prop of ind. actually simulated
 
 At the individual level...
 
-```{r}
+```{r plot-individual-PofZ-for-LOO}
 # top p of z for each simulated individual
 loo_top_pofz <- loo_output$indiv_posteriors %>%
   group_by(repunit_scenario, collection_scenario, iter, indiv, simulated_repunit, simulated_collection) %>%
   slice_max(., order_by = PofZ)
 
-```
 
-
-```{r}
 # plot individual posteriors for LOO
-
 loo_top_pofz %>%
   filter(PofZ > 0.90) %>%
   group_by(simulated_repunit, repunit) %>%
@@ -440,6 +424,46 @@ ggsave("pdf_outputs/LOO_indiv_posteriors90.pdf", width = 8, height = 5)
   
 
 ```
+Summarize those results:
+
+```{r summarize-LOO-results-at-90-PofZ}
+simulated <- loo_top_pofz %>%
+  filter(PofZ > 0.90) %>%
+  group_by(simulated_repunit) %>%
+  tally(name = "total_per_repunit")
+
+
+loo_top_pofz %>%
+  filter(PofZ > 0.90) %>%
+  group_by(simulated_repunit, repunit) %>%
+  tally(name = "assigned_n") %>%
+  mutate(correct = ifelse(simulated_repunit == repunit, "TRUE", "FALSE")) %>%
+  left_join(., simulated, by = "simulated_repunit") %>%
+  mutate(perc_correct = assigned_n/total_per_repunit)
+
+```
+100% correct assignment to Torishima
+99.9% correct assignment to FFS
+99% correct assignment to Midway
+98.8% correct to Laysan
+88.7% correct to Kure
+
+highest misassignments = 
+6.5% misassigned from Kure to FFS
+4.8% misassigned from Kure to Midway
+1% misassigned from Midway to Kure and from Laysan to Midway
+
+```{r}
+# overall
+loo_top_pofz %>%
+  filter(PofZ > 0.9) %>%
+  mutate(correct = ifelse(simulated_repunit == repunit, 1, 0)) %>%
+  ungroup() %>%
+  summarise(sum(correct))
+
+```
+
+
 
 
 #### self-assignment to generate z-score distributions
@@ -460,12 +484,116 @@ selfassigned %>%
 Kind of a sad distribution with so few samples (Laysan, Midway), but at least they're all centered between -3 and 2.
 
 
+Sample sizes:
+```{r think-more-deeply-about-sample-sizes}
+ref_two_col %>%
+  group_by(repunit) %>%
+  tally()
+```
+Figure 4 from the DeSaix et al. WGSassign paper has me thinking about the systematic bias created by unequal sample sizes. In this case, assuming that allele frequency estimates are independent of read depths because in each case, depths are sufficient to call genotypes (rather than using genotype-likelihoods).
+
+We shouldn't have any problem assigning samples correctly to Torishima because of the relatively high genetic differentiation between Japanese and Hawaiian colonies (Fst > 0.03).
+
+What happens if we equalize sample size to 7 for the Laysan birds?
+
+```{r equalize-sample-sizes}
+# set seed for reproducibility of random sampling
+set.seed(359)
+
+# downsample to equalize source population sizes
+test_loo <- ref_two_col %>%
+  group_by(repunit) %>%
+  sample_n(size = 7, replace = F) %>%
+  ungroup()
+```
+
+
+```{r equalize-sample-sizes-fct}
+# make it a function
+# leave-one-out
+# test_loo_ss <- function(test_2col_df){
+# 
+#     test_loo_output <- rubias::assess_reference_loo(test_2col_df, gen_start_col = 5, return_indiv_posteriors = T)
+#     
+#     # top p of z for each simulated individual
+#     top_test_loo <- test_loo_output$indiv_posteriors %>%
+#       group_by(repunit_scenario, collection_scenario, iter, indiv, simulated_repunit, simulated_collection) %>%
+#       slice_max(., order_by = PofZ) 
+#     
+#     tmp <- top_test_loo %>%
+#       filter(PofZ > 0.90) %>%
+#       group_by(simulated_repunit) %>%
+#       tally(name = "total_per_repunit")
+#     
+#     plot_df <- top_test_loo %>%
+#       filter(PofZ > 0.90) %>%
+#       group_by(simulated_repunit, repunit) %>%
+#       tally(name = "assigned_n") %>%
+#       mutate(correct = ifelse(simulated_repunit == repunit, "TRUE", "FALSE")) %>%
+#       left_join(., tmp, by = "simulated_repunit") %>%
+#       mutate(perc_correct = assigned_n/total_per_repunit)
+#     
+#     # plot that up
+#     plot <- plot_df %>%
+#       ggplot(aes(y = repunit, x = simulated_repunit, size = perc_correct, color = correct)) +
+#       geom_point() +
+#       theme_bw() +
+#       labs(size = "Proportion",
+#            color = "Accurate assignment",
+#            y = "Assigned source population",
+#            x = "Simulated source population")
+#     
+#     print(plot)
+#     
+# }
+```
+
+
+```{r test-loo-function}
+# equal sample sizes
+test_loo_ss(test_loo)
+
+```
+
+With equalized baseline sample sizes, the correct assignment ranged from 0.83-1.0, and incorrect assignments from 0.0009-0.17.
+
+Try doing the same thing, but with higher sample sizes (10 inds, except for Laysan, which will have 7)
+
+```{r test-10-inds-per-source-pop}
+# this might change things substantially because 7 samples vs. 10 samples is a 30% difference in the amount of data available for estimating allele frequencies
+
+# set seed for reproducibility of random sampling
+set.seed(765)
+
+# downsample to equalize source population sizes
+tmp1 <- ref_two_col %>%
+  filter(repunit != "Laysan") %>% # exclude Laysan birds and then add them back on
+  group_by(repunit) %>%
+  sample_n(size = 10, replace = F) %>%
+  ungroup()
+
+test_loo10 <- ref_two_col %>%
+  filter(repunit == "Laysan") %>%
+  bind_rows(tmp1)
+
+test_loo_ss(test_loo10)
+
+```
+
+```{r original-reference-data}
+test_loo_ss(ref_two_col)
+
+```
+
+
+
+
 
 ## Mixture bycatch assignment
 
 
 
-```{r}
+```{r make-alleles-df}
 # format for rubias
 mix_idx <- alle_idxs %>%
   anti_join(., ref_pops, by = c("sampleID")) %>%
@@ -481,16 +609,14 @@ mix_idx %>%
     dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
     dplyr::filter(n > 1L)
 
-tmp <- mix_idx 
-
 ```
 
 
 
 
-```{r}
+```{r create-two-column-format-for-rubias}
 # make two-col format
-mix_two_col <- tmp %>%
+mix_two_col <- mix_idx %>%
   arrange(indiv, locus, gene_copy) %>%
   unite("loc", 2:3, sep = ".") %>%
   pivot_wider(names_from = loc, values_from = alleidx) %>%
@@ -511,83 +637,114 @@ ref <- tmp_combo %>%
 
 
 
-```{r}
+```{r perform-mixture-assignment-rubias}
 # mixture analysis
 bycatch_assign <- rubias::infer_mixture(reference = ref, mixture = mix, gen_start_col = 5)
 
-```
-
-```{r}
 mix_assigned <- bycatch_assign$indiv_posteriors %>%
   group_by(indiv) %>%
-  slice_max(., order_by = PofZ)
+  slice_max(., order_by = PofZ) #%>% # But the Laysan assignments are actually mistaken samples that came from Laysan albatross
+  #filter(!indiv %in% c("11-0626", "11-0628", "16-0412", "16-0413", "19-0314", "12-0369"))
 
 # by repunit/collection
 mix_assigned %>%
   group_by(repunit) %>%
   tally()
 
-# distribution of PofZ for top assignments
-mix_assigned %>%
-  ggplot(aes(x = PofZ)) +
-  geom_histogram()
-
-```
-
-768 bycatch birds (this is the 959-63 with missing data, -129 in the reference populations)
-
-what % of that assigned at >90% PofZ?
-```{r}
+# what % of that assigned at >90% PofZ?
 mix_assigned %>%
   filter(PofZ >0.90) %>%
   group_by(repunit) %>%
-  tally() 
+  tally() %>%
+  summarise(sum(n))
 
-```
-```{r}
-606/768
-```
-
-78.9% of bycatch assigned at >90%
-
-```{r}
 mix_assigned %>%
-  filter(PofZ >0.9) %>%
+  filter(PofZ > 0.9) %>%
   ggplot(aes(x = z_score)) +
   geom_histogram()
 
 ```
 
+757 bycatch birds (this is minus missing data, -129 in the reference populations)
+
+78.7% of bycatch assigned at >90%
+
+
 The birds that are out past 8 are almost certainly not from one of our breeding colonies
 
 
-```{r}
-mix_assigned %>%
-  filter(z_score < -5)
+
+##### before continuing on, let's look at Pat's suggestion about testing convergence?
+
+
+```{r test-convergence-for-baseline}
+source("../R/rubias_MultChains.R")
+
+# test Pat's function
+TestOut <- rubias_MultChains(reference = ref,
+                                mixture = mix,
+                                nchains = 5,
+                                MCMCsteps = 50000,
+                                BurnIn = MCMCreps/2)
+
+
+```
+This output provides the point estimate for a random chain. A few key notes: The upper value should be < 1.1 for all reporting groups.
+We want to make sure the chains aren't bouncing around (within and among chain variance).
+And we want to run the MCMC far enough to get away from initial conditions because variance could be caused by initial conditions (particularly important for low Fst populations).
+
+Ok, so for this dataset, the rep unit proportions remain very consistent regardless of the number of MCMC steps.
+FFS has ~75% of the bycatch
+Kure has ~12% of the bycatch 
+Midway has ~13% of the bycatch 
+Laysan and Torishima have < 1% of the bycatch each.
+
+
+```{r view-simulation-output}
+TestOut
 
 ```
 
-All of the birds with low z-scores look like they're closest to Laysan. None have a lot of missing loci... I wonder if there are some fixed differences?
+
+
+##### back to the previous bycatch mixture assignment results (pre-interlude)
+
+
+```{r rubias-mixture-assignment-results-filtered}
+mix_assigned %>%
+  filter(PofZ > 0.9 &
+           z_score > -3) %>%
+  group_by(repunit) %>%
+  tally()
+
+```
+
+There are 20 samples 
 
 
 ```{r}
 # What about the rest of the distribution?
-mix_assigned %>%
-  filter(PofZ > 0.9) %>%
+mix_assigned_to_keep <- mix_assigned %>%
+  filter(PofZ > 0.9 &
+           z_score > -3)
+
+mix_assigned_to_keep %>%
   ggplot(aes(x = repunit, fill = collection)) +
   geom_bar(stat = "count") +
   theme_minimal() +
   labs(x = "Reporting group",
        y = "Number of bycatch samples",
        fill = "Assigned reporting group") +
-  scale_fill_manual(values = c( "dodgerblue",  "darkgreen", "darkslateblue","#74c476",  "tomato")) +
+  scale_fill_manual(values = c( "dodgerblue",  "darkslateblue","#74c476",  "tomato")) +
   theme(
     axis.title.x = element_text(margin = margin(t=10)),
-      axis.title.y = element_text(margin = margin(r = 10))
+      axis.title.y = element_text(margin = margin(r = 10)),
+    legend.position = "none"
   )
 
-ggsave("pdf_outputs/assigned_bycatch_PofZ90.pdf")
+ggsave("pdf_outputs/assigned_bycatch_PofZ90_zscore3.pdf")
 ```
+576 samples assigned at > 0.9 PofZ and within 3 sd of the mean (z-scores)
 
 ```{r}
 # bycatch_dataset <- mix_assigned %>%
@@ -597,15 +754,171 @@ ggsave("pdf_outputs/assigned_bycatch_PofZ90.pdf")
 #   arrange(indiv)
 
 bycatch_assignments <- meta %>%
+  #filter(!sampleID %in% c("11-0626", "11-0628", "16-0412", "16-0413", "19-0314", "12-0369")) %>%
   select(-Sample_Plate, -Sample_Well, -gtseq_run, -id, -Sample_Plate) %>%
   left_join(., mix_assigned, by = c("sampleID" = "indiv")) %>%
   select(-missing_loci) %>%
   unique() %>%
   arrange(sampleID)
 
-
-
+# take a quick look at the reference samples (not from Jessie)
+# without metadata
 bycatch_assignments %>%
-  write_csv("csv_outputs/BFAL_bycatch_assignments_20230403.csv")
+  filter(is.na(VerifySpecies))
+
+# output the dataframe that includes colony info for banded birds that did not make it through bycatch assignment
+# and for banded birds that were assigned to a different population
+dataset_to_output <- bycatch_assignments %>%
+  filter(!is.na(VerifySpecies)) %>%
+  mutate(colony = ifelse(is.na(population), repunit, population)) %>% # either reference pop or bycatch assignment
+  mutate(colony = ifelse(`BandY/N` == TRUE & !is.na(`Loc-Abbr`), `Loc-Abbr`, colony)) 
+  
 ```
+We're down to two birds unaccounted for (no metadata?) but genotypes/assignments.
+
+Verify:
+(1) sample IDs are only entered once:
+```{r}
+bycatch_assignments %>%
+  filter(!is.na(VerifySpecies)) %>%
+  select(sampleID) %>%
+  unique()
+
+```
+
+(2) How many NAs?
+```{r}
+bycatch_assignments %>%
+  filter(!str_detect(sampleID, "BFAL")) %>%
+  filter(is.na(reference)) %>% # remove the reference samples
+  filter(is.na(collection))
+
+```
+
+Final accounting:
+950 total bycatch + reference samples
+858 bycatch samples
+757 bycatch samples in the rubias analysis
+576 bycatch with assignments >0.9 PofZ and > -3 z-scores
+
+596 samples with PofZ > 0.9
+20 samples with z-score < -3
+
+237 with no assignment (using our PofZ and z-score thresholds)
+92 reference samples (non-bycatch)
+45 bycatch reference samples (banded birds)
+
+
+```{r metadata-for-inds-missing}
+missing_data_inds <- inds_to_toss %>%
+  left_join(., meta) %>%
+  select(-`sum(missingness)`)
+
+tmp2 <- dataset_to_output %>%
+  anti_join(., missing_data_inds)
+
+final_output <- tmp2 %>% bind_rows(., missing_data_inds)
+
+# final_output %>%
+#   write_csv("csv_outputs/BFAL_bycatch_and_banded_assignments_20230419.csv")
+
+```
+
+
+
+## Reconsidering mixture assignment with unequal sample sizes
+
+Again, based on a close-reading of the WGSassign manuscript, I'm concerned about systematic bias in assignment to the source populations with larger sample sizes.
+
+
+Consider the difference in bycatch proportions if using a reference baseline with equal repunit sample sizes:
+
+
+
+Just to test...
+
+
+```{r test-bycatch-assignment-w-equal-source-pop-sample-sizes}
+# set function
+bycatch_assign_test <- function(reference){    
+    # mixture analysis
+    bycatch_assign <- rubias::infer_mixture(reference = reference, mixture = mix, gen_start_col = 5)
+    
+    mix_assigned <- bycatch_assign$indiv_posteriors %>%
+      group_by(indiv) %>%
+      slice_max(., order_by = PofZ) #%>% # But the Laysan assignments are actually mistaken samples that came from Laysan albatross
+      #filter(!indiv %in% c("11-0626", "11-0628", "16-0412", "16-0413", "19-0314", "12-0369"))
+    
+    # by repunit/collection
+    mix_output <- mix_assigned %>%
+      filter(PofZ > 0.9 &
+               z_score > -3) %>%
+      group_by(repunit) %>%
+      tally()
+    
+    print(mix_output)
+    
+}
+
+# equal sizes (7 inds per source pop)
+bycatch_eq_source_pops <- bycatch_assign_test(test_loo10)
+```
+
+
+Despite the LOO evaluation of the source population samples, it looks like the results will vary substantially depending on whether sample sizes are normalized or not. We can also look at the minor allele frequencies for the GTseq markers as another metric of how much of a difference the sample sizes might make.
+
+
+Ok, after talking to Pat about this, I have a path forward.
+Equalizing sample sizes to 7 birds/population is likely distorting the allele frequency estimates severely, which is why the number of bycatch birds changes so dramatically. This is especially true for the largest colonies (Laysan and Midway).
+
+Given that, I'm going to test what the assignments are if I remove Laysan from the baseline (to which only a maximum of 4 birds would be assigned) and then equalize the sample sizes to 17 birds/population.
+
+
+```{r remove-laysan-and-equalize-pops}
+# set seed for reproducibility of random sampling
+set.seed(359)
+
+# downsample to equalize source population sizes
+test_loo_noLaysan <- ref_two_col %>%
+  group_by(repunit) %>%
+  filter(repunit != "Laysan") %>%
+  #sample_n(size = 17, replace = F) %>%
+  ungroup()
+
+test_loo_ss(test_loo_noLaysan)
+```
+```{r}
+bycatch_assign_test(test_loo_noLaysan)
+
+```
+
+That exercise actually gives me more confidence in my original assignment results. 
+
+
+
+Can I use the banded birds for some groundtruthing??
+
+
+```{r test-banded-birds-for-verification}
+banding_mismatches <- final_output %>%
+  filter(`BandY/N` == TRUE & !is.na(Location)) %>%
+  separate(`Loc-Abbr`, into = c("NWHI", "banding_site"), sep = ", ") %>%
+  filter(banding_site != repunit) %>%
+  select(sampleID, banding_site, repunit, PofZ, z_score, n_miss_loci)
+  
+# now look at those individuals with the equalized dataset. 
+# are fewer banded birds misassigned?
+
+```
+
+
+```{r}
+# banding_mismatches %>%
+#   left_join(., bycatch_eq_source_pops, by = c("sampleID" = "indiv")) %>%
+#   filter(repunit.x != repunit.y)
+
+```
+Well, for better or worse, none of the mismatches between genetic assignment and banding assignments were fixed by using equal sample sizes for the baseline.
+
+
 

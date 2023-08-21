@@ -41,7 +41,7 @@ library(DescTools)
 genos_long <- read_rds("../data/processed/called_genos_na_explicit.rds")
 
 # just select the reference samples based on metadata
-samplesheets <- read_rds("../data/processed/metadata_bycatch_and_reference_20230330.rds")
+samplesheets <- read_rds("../data/processed/metadata_bycatch_and_reference_20230413.rds")
 
 reference_samples <- samplesheets %>%
   filter(Sample_Plate %in% c("BFAL001", "BFAL002") &
