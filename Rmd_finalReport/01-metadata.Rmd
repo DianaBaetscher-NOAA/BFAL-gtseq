@@ -19,7 +19,7 @@ Cleaning up final set of metadata before R&R final report and passing off this r
 ## Metadata for bycatch and reference samples
 
 
-```{r}
+```{r load-libraries}
 library(tidyverse)
 library(data.table)
 library(readxl)
@@ -145,13 +145,122 @@ bycatch_samplesheet_data
  full_metadata_all_samples <- bycatch_samplesheet_data %>%
   full_join(., meta_fixed_locs, by = c("sampleID" = "MWVCRC#")) %>%
   bind_rows(., reference_meta_wo_banded) %>%
-  select(-I7_Index_ID, -index, -I5_Index_ID, -index2, -Sample_Project) %>%
+  dplyr::select(-I7_Index_ID, -index, -I5_Index_ID, -index2, -Sample_Project) %>%
   rename(population = pop)
 
-full_metadata_all_samples %>%
-  write_rds("../data/processed/metadata_bycatch_and_reference_20230330.rds")
+full_metadata_all_samples #%>%
+  #write_rds("../data/processed/metadata_bycatch_and_reference_20230330.rds")
 
 ```
 
 Because some samples were genotyped multiple times, I'll have the same metadata entry match multiple samplesheet entries.
+
+```{r summarizing-samples}
+# get rid of duplicates
+unique_samples <- full_metadata_all_samples %>%
+  dplyr::select(-Sample_Plate, -Sample_Well, -gtseq_run, -id) %>%
+  unique()
+
+# does that include reference samples that were not bycatch?
+unique_samples %>%
+  filter(!is.na(reference))
+
+# yes - that's the full set of reference samples that were used for lcWGS
+unique_samples %>%
+  filter(is.na(reference) | `BandY/N` == T)
+```
+
+45/137 banded birds in the reference
+
+There are some NA samples in there...
+```{r na-samples-in-metadata}
+unique_samples %>%
+  filter(is.na(SBNDID) & is.na(reference))
+
+```
+These samples maybe weren't included in the metadata - but were genotyped. Or they were removed later because they were the wrong species, etc.
+
+Either way, it seems like maybe they should be excluded at this stage?
+
+
+
+### More metadata investigations
+
+15 December 2023
+
+
+Something is up.
+
+```{r working-sheet-from-jessie}
+check <- read_csv("~/Downloads/BFAL_GSI_bands_output_20231208.csv")
+
+check %>%
+  filter(SBNDID != SBNDID_correct)
+```
+
+Accounting of unique samples for Jessie:
+```{r}
+unique_samples %>%
+  mutate(fate = ifelse(is.na(SBNDID), "sample removed (species) or no metadata received", "sample included in GSI")) %>%
+ # write_csv("csv_outputs/metadata_check_20231215.csv")
+  filter(str_detect(sampleID, "08-"))
+
+```
+11 samples with `08-` in the metadata. 
+
+
+#### Now read in the GSI output and compare
+
+```{r}
+gsi <- read_csv("BFAL_GSI_bands_output_20231208.csv")
+
+mismatched <- gsi %>%
+  dplyr::select(sampleID, SBNDID) %>%
+  left_join(., check, by = "sampleID") %>%
+  filter(SBNDID.x != SBNDID_correct)
+
+mismatched
+```
+Very weird that the only birds affected are the `08-` samples.
+
+Which birds should have those SBNDID numbers?
+```{r}
+mismatched %>%
+  dplyr::select(SBNDID.x) %>%
+  left_join(., unique_samples, by = c("SBNDID.x" = "SBNDID"))
+
+```
+
+```{r}
+# did those sampleIDs drop out or are there duplicate SBNDID numbers
+gsi %>%
+  filter(sampleID == "08-2152")
+```
+Ok, so those samples didn't make it into the gsi output.
+
+
+#### DOUBLE-CHECK THESE ####
+
+08-1844
+08-2149
+08-2150 (I think this is a LAAL)
+08-2152
+08-2169
+
+
+
+
+
+Do the SBNDID numbers match up correctly in the metadata?
+```{r}
+unique_samples %>%
+  dplyr::select(sampleID, SBNDID) %>%
+  filter(str_detect(sampleID, "08-"))
+  left_join(., check, by = "sampleID") %>%
+  filter(SBNDID.x != SBNDID_correct)
+
+```
+
+Ok, so the metadata that I have in hand is correct wgt the SampleID/SBNDID numbers.
+
 

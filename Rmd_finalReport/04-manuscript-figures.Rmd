@@ -1,0 +1,321 @@
+---
+title: "manuscript-figures"
+author: "diana baetscher"
+date: "2023-12-06"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Tightening up some figures for the BFAL manuscript.
+```{r load-libraries}
+library(tidyverse)
+library(readxl)
+
+```
+
+
+Reading in the data from Jessie:
+```{r}
+#dat <- read_csv("../data/BFAL_spatial_UDs_4.25.23.csv")
+
+final_output <- read_csv("../data/BFAL_GSI_bands_output_20231208_latlong.csv") %>%
+    filter(CollYear > 2009) # 28 birds pre-2010
+
+final_output %>%
+  group_by(FisheriesName, colony) %>%
+  tally()
+
+# remove those pre-2010 and then move the dataset forward with just samples with spatial information
+bfal <- final_output %>%
+  filter(!is.na(lat)) %>%
+  mutate(colony = str_replace(colony, "NWHI, ", "")) %>%
+  filter(colony %in% c("Midway", "Kure", "FFS")) #%>%
+    # group_by(colony) %>%
+    # tally()
+  
+# 617 birds with spatial information
+  
+
+banded_birds_no_loc_keepers <- final_output %>%
+  filter(`BandY/N` == T & is.na(Location) & PofZ > 0.9 & z_score > -3)
+
+bands_to_toss <- final_output %>%
+  filter(`BandY/N` == T & is.na(Location)) %>%
+  anti_join(., banded_birds_no_loc_keepers)
+
+# bfal <- final_output %>%
+#   anti_join(., bands_to_toss) %>%
+#   inner_join(., dat) # for now this is an inner join. Hopefully there's more spatial data for the 656 samples that are in the final dataset
+# 
+# bfal
+```
+7 banded bycatch samples without location information and without confident GSI assignments. Remove these from the dataset.
+
+
+```{r color-palette}
+# set colors
+mypalette <- c("dodgerblue", "#006d2c", "skyblue", "darkslateblue", "#74c476",  # Hawaii - greens, blues
+               "tomato", "#31a354") # Japan - red
+               
+
+# Kure = dodgerblue
+# Midway = darkslateblue
+# FFS = "#74c476"
+```
+```{r population-estimates}
+pop_est <- read_csv("../data/bfal_pop_estimates.csv")
+
+prop_total_pop <- pop_est %>%
+  filter(colony != "Total") %>%
+  mutate(total_pop = sum(population_estimate)) %>%
+  mutate(perc_of_total = population_estimate/total_pop) %>%
+  mutate(GenCollArea = "Total population") %>%
+  mutate(colony = colony_abbr) # fix this once we figure out what's needed for Lehua
+
+
+```
+
+
+Make barplot based on population proportions
+```{r}
+final_bycatch_prop <- final_output %>%
+  anti_join(., bands_to_toss) %>%
+  group_by(colony, GenCollArea) %>%
+  mutate(colony = ifelse(colony == "NWHI, FFS", "FFS", colony)) %>%
+  mutate(colony = ifelse(colony == "NWHI, Kure", "Kure", colony)) %>%
+  mutate(colony = ifelse(colony == "NWHI, Midway", "Midway", colony)) %>%
+  mutate(colony = ifelse(colony == "NWHI, Laysan", "Laysan", colony)) %>%
+  mutate(colony = ifelse(colony %in% c("Kauai, Kilauea", "Kauai, Lehua"), "Other", colony)) %>%
+  mutate(colony = ifelse(is.na(colony), "Unassigned", colony)) %>%
+  tally() %>%
+  arrange(GenCollArea) %>%
+  ungroup() %>%
+  group_by(GenCollArea) %>%
+  mutate(area_bycatch = sum(n)) %>%
+  group_by(colony, GenCollArea) %>%
+  mutate(col_bycatch_region = sum(n)) %>%
+  mutate(col_bycatch_region_prop = col_bycatch_region/area_bycatch) %>%
+  # calculate the bycatch proportions for all fisheries combined
+  ungroup() %>%
+  mutate(total_bycatch = sum(n)) %>%
+  group_by(colony) %>%
+  mutate(colony_total = sum(n)) %>%
+  mutate(perc_of_total = colony_total/total_bycatch) %>%
+  ungroup() 
+  
+all_fish_data <- final_bycatch_prop %>%
+  dplyr::select(colony, perc_of_total) %>%
+  mutate(GenCollArea = "All fisheries") %>%
+  unique()
+
+# add in proportion of total population
+prop_total_pop %>%
+  left_join(., final_bycatch_prop, by = c("colony_abbr" = "colony")) 
+
+
+combined_prop_df <- final_bycatch_prop %>%
+  bind_rows(., prop_total_pop) %>%
+  bind_rows(all_fish_data) %>%
+  mutate(col_bycatch_region_prop = ifelse(is.na(col_bycatch_region_prop), perc_of_total, col_bycatch_region_prop)) %>%
+  filter(!is.na(colony),
+         GenCollArea != "WA") %>%
+  mutate(GenCollArea = ifelse(GenCollArea == "AK", "Alaska fisheries", GenCollArea)) %>%
+    mutate(GenCollArea = ifelse(GenCollArea == "HI", "Hawaii fisheries", GenCollArea))
+
+  
+```
+Remove WA (low sample sizes)
+Add all fisheries combined (including WA)
+
+```{r barplot-with-proportions}
+area_order <- combined_prop_df$GenCollArea <- factor(combined_prop_df$GenCollArea, levels=c("Total population", "All fisheries", "Alaska fisheries", "Hawaii fisheries"))
+
+bycatchA <- combined_prop_df %>%
+  mutate(colony = ifelse(colony == "FFS", "French Frigate Shoals", colony)) %>%
+  ggplot(aes(x = GenCollArea, y = col_bycatch_region_prop, fill = colony)) +
+  geom_bar(stat = "identity", position = "stack") +
+  #facet_grid(rows = vars(GenCollArea)) +
+  theme_bw() +
+  labs(
+    fill = "BFAL breeding \ncolony",
+    y = "Proportion",
+    x = " "
+  ) +
+  scale_y_continuous(limits = c(0, 1), expand = c(0,0)) +
+  scale_fill_manual(values = c("#74c476", "dodgerblue", "#006d2c", "darkslateblue", "skyblue", "tomato", "gray")) +
+  theme(
+    axis.title.x = element_text(margin = margin(t=10)),
+      axis.title.y = element_text(margin = margin(r = 10))
+
+  )
+
+bycatchA
+
+ggsave("pdf_outputs/colony_bycatch_barplot.png", width = 7, height = 4)
+```
+Alternative plot with differences between the population and the fisheries:
+
+```{r difference-plot-for-comparison}
+# because I had to futz with the dataframe earlier, there are odds and ends out of place
+bycatch_diff <- combined_prop_df %>%
+  mutate(colony = ifelse(colony == "FFS", "French Frigate Shoals", colony)) %>%
+  dplyr::select(colony, GenCollArea, col_bycatch_region_prop) %>%
+  pivot_wider(names_from = "GenCollArea", values_from = col_bycatch_region_prop) %>%
+  pivot_longer(cols = c(`All fisheries`, `Alaska fisheries`, `Hawaii fisheries`), names_to = "fishery", values_to = "prop_bycatch") %>%
+  mutate(perc_diff = (prop_bycatch-`Total population`)*100) %>%
+  filter(!is.na(perc_diff)) 
+# reorder the factor
+bycatch_diff$fishery <- factor(bycatch_diff$fishery, levels= c("All fisheries", "Alaska fisheries", "Hawaii fisheries"))
+bycatch_diff$colony <- factor(bycatch_diff$colony, levels = c("French Frigate Shoals", "Kure", "Laysan", "Midway", "Torishima", 
+                                                              "Other"))
+
+bycatchB <- bycatch_diff %>%
+  ggplot(aes(x = fishery, y = perc_diff, color = colony)) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0, col = "black", linetype = "dotted") +
+   theme_bw() +
+  labs(
+    color = "Bycatch \ncolony of origin",
+    y = "% diff. bycatch-population prop.",
+    x = " "
+  ) +
+  #scale_y_continuous(limits = c(0, 1), expand = c(0,0)) +
+  scale_color_manual(values = c("#74c476", "dodgerblue", "#006d2c", "darkslateblue", "tomato", "skyblue")) +
+  theme(
+    axis.title.x = element_text(margin = margin(t=10)),
+      axis.title.y = element_text(margin = margin(r = 10))
+
+  )
+  
+bycatchB
+
+ggsave("pdf_outputs/colony_bycatch_diff_plot.png", width = 6, height = 3.5)
+
+```
+
+```{r combine-bycatch-plots}
+library(patchwork)
+
+bycatchA + bycatchB + plot_annotation(tag_levels = "A") + plot_layout(ncol = 1)
+
+ggsave("pdf_outputs/colony_bycatch_diff_plot_2panel.png", width = 7, height = 6)
+```
+
+
+
+
+## Spatial analysis with utilization distributions
+
+Copying over Jessie's code and modifying, then modifying more with Jon's input:
+
+```{r spatial-analysis-maps}
+#load packages (could probably remove some of these - calling in a bunch just in case)
+library(tidyverse)
+library(adehabitatHR)
+library(ggplot2)
+library(magrittr)
+library(sp)
+library(sf)
+library(raster)
+library(rgdal)
+library(mapdata)
+library(dplyr)
+
+bfal$colony <- factor(bfal$colony, levels = c("FFS", "Kure", "Midway"), 
+                  labels = c("FFS (486)", "Kure (46)", "Midway (57)"))
+
+bfal$long360=ifelse(bfal$long < 0,bfal$long + 360, bfal$long)
+
+#colony locations
+colony_locs <- read_csv("../data/latlon_df.csv")
+
+
+```
+
+
+
+```{r spatial-analysis-maps-part2}
+#summarize to double check
+bfal %>% group_by(colony) %>% 
+  tally()
+
+# there are 617 birds at this stage, AK, HI, and WA combined
+# only includes birds with band data or GSI with PofZ >=.9, and must have spatial data
+
+# test plot
+plot(bfal$long360, bfal$lat, asp = 1)
+
+bfal %>%
+  dplyr::select(sampleID, lat, long, long360)
+
+points = st_as_sf(bfal, coords = c("long360", "lat"), crs = 4326)
+plot(st_geometry(points), pch=1, col="navy")
+
+# make kernels
+
+# Make a spatial points data.frame (SPDF)
+spdf <- SpatialPointsDataFrame(coords=cbind(bfal$long,
+  # bfal$long360,
+                                            bfal$lat),
+                               data=data.frame(id=bfal$colony),
+                               proj4string = CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs +wrap_lon=180"))
+
+# Project data into laea
+spdf.t <- spTransform(spdf,
+                      # CRS("+proj=aea +lat_1=55 +lat_2=65 +lat_0=50 +lon_0=-154")
+                      CRS("+proj=aea +lat_1=30 +lat_2=70 +lat_0=52 +lon_0=-170 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs") #https://spatialreference.org/ref/sr-org/north-pacific-albers-conic-equal-area/
+                      ) ## this projection might be wrong - check with Jon?
+
+# calculate kernelUD
+#jb try to up h factor and see what happens (more smoothing) ## get more details from Jon on the smoothing factor
+ud <- kernelUD(spdf.t, 
+               h = 100000,
+               # h="href",
+               # h=200000, #200km; 100km as used previously seemed a bit small, but if you want more detail and independent ud50 blobs maybe go back to 100km
+               grid=200, #
+               same4all=TRUE #the default for this is FALSE but I think you might want to calc the UDs for each ID (colony) over the same extent
+               )
+ud90 <- getverticeshr(ud, percent=90, standardize=T)
+ud50 <- getverticeshr(ud, percent=50, standardize=T)
+
+ud50sf<-st_as_sf(ud50) #I am just keeping these separate
+ud90sf<-st_as_sf(ud90)
+
+world <-st_crop(st_transform(st_as_sf(maps::map("world", plot = FALSE, fill = TRUE)), 
+                             st_crs(ud90sf)),
+                             1.15*st_bbox(ud90sf)) %>% #crop to just beyond extent of ud90
+  filter(ID!="Antarctica")
+
+p3 <-ggplot() + 
+  geom_sf(data=ud90sf, aes(fill=id), alpha=0.2) +
+  geom_sf(data=ud50sf, aes(fill=id), alpha=0.8) + 
+  geom_sf(data=world, fill="gray30",color=NA) +
+  facet_wrap(~id) +
+  labs(fill = "UD by \ncolony",
+       x = "",
+       y = "")+
+  theme_bw() +
+  scale_x_continuous(breaks = c(-175, -155, -135), labels = c("175˚W", "155˚W", "135˚W"), expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = c("#74c476", "dodgerblue", "slateblue")) +
+  theme(
+    axis.text.x = element_text(size = 7),
+    axis.text.y = element_text(size = 7)
+  ) 
+
+p3 
+
+# ann_text <- data.frame(x = -165, y = 20, lab = "90% UD",
+#                        id = factor(`FFS (486)`, levels = c("FFS (486)", "Kure (46)", "Midway (57)")))
+
+# p + geom_text(data = ann_text,label = "Text")
+
+ggsave(plot=p3,"pdf_outputs/BFAL_UDs_3panels.png", width = 8, height = 4)
+
+```
+

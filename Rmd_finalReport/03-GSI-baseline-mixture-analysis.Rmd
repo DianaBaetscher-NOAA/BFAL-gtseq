@@ -9,7 +9,7 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-load("03-intermed-outputs-for-md.RData")
+#load("03-intermed-outputs-for-md.RData")
 ```
 
 ## Genetic stock identification
@@ -36,6 +36,9 @@ library(readxl)
 library(stringr)
 library(lubridate)
 library(rubias)
+library(patchwork)
+library(dplyr)
+
 
 source("../R/rubias_MultChains.R")
 ```
@@ -51,8 +54,9 @@ meta <- read_rds("../data/processed/metadata_bycatch_and_reference_20230418.rds"
   filter(sampleID != "21-0252") # apparently this sample was not genotyped. Better to remove it here for accounting.
 
 unq_samples <- meta %>%
-  select(sampleID, population, reference, gtseq_run, id, Location) %>%
+  dplyr::select(sampleID, population, reference, gtseq_run, id, Location) %>%
   unique
+
 
 # read in rds file with genotypes
 genos_NA_explicit <- read_rds("../data/processed/called_genos_na_explicit.rds") %>%
@@ -65,7 +69,7 @@ genos_long <- genos_NA_explicit %>%
 # quick list of the reference samples and their respective populations
 ref_pops <- genos_long %>%
   filter(!is.na(reference)) %>%
-  select(sampleID, population, Location) %>%
+  dplyr::select(sampleID, population, Location) %>%
   unique()
 
 genos_long %>% head()
@@ -78,6 +82,28 @@ genos_long %>% head()
 #   select(sampleID) %>%
 #   unique() %>%
 #   write_csv("csv_outputs/bycatch_sample_list_20230414.csv")
+
+genotyped_w_loc_info <- unq_samples %>%
+  select(sampleID) %>%
+  left_join(., meta) %>%
+  select(sampleID, Location, population, reference, FisheriesName, `BandY/N`, `Loc-Abbr`) %>%
+  unique() %>%
+  filter(!sampleID %in% c("18-0517", "21-0287")) #these weren't genotyped
+
+# Info for manuscript table - fisheries collections
+genotyped_w_loc_info %>%
+  filter(!is.na(FisheriesName)) %>%
+  mutate(FisheriesName = ifelse(FisheriesName == "Alaska Groundfish fisheries", "Alaska Groundfish Fisheries", FisheriesName)) %>%
+  mutate(FisheriesName = ifelse(FisheriesName == "Hake Trawl", "At-Sea Hake Trawl", FisheriesName)) %>%
+  group_by(FisheriesName) %>%
+  tally() %>%
+  mutate(Region = ifelse(str_detect(FisheriesName, "Hawaii"), "Hawaii", NA)) %>%
+  mutate(Region = ifelse(str_detect(FisheriesName, "Alaska"), "Alaska", Region)) %>%
+  group_by(Region, FisheriesName) %>%
+  arrange(Region, desc(n)) %>%
+  select(Region, FisheriesName, n) %>%
+  write_csv("csv_outputs/n_samples_per_fishery.csv")
+  
 ```
 
 
@@ -133,10 +159,10 @@ geno_one_each %>%
 ```{r}
 # try using this df to eliminate issues with duplication
 genos_no_dups <- geno_one_each %>%
-  select(-gtseq_run, -id, -total_depth, -rank)
+  select(-gtseq_run, -id, -total_depth, -rank) %>%
+  filter(!is.na(sampleID)) # remove the sample with no sampleID
 
 ```
-
 
 
 
@@ -196,7 +222,8 @@ I might as well get rid of the monomorphic loci, no?
 
 Missing data:
 
-959 individuals * 2 alleles per locus
+(948 inds)
+959 individuals * 2 alleles per locus **this is now 948 individuals after removing Laysan birds from metadata. I'm keeping the analysis as-is to avoid too much confusion.
 
 50% missing data per locus = 959
 ```{r}
@@ -269,19 +296,46 @@ genos_locs_ind_filtered <- genos_locs_filtered %>%
 
 ```
 62 samples had >25% missing data
+```{r output-inds-missing-data}
+inds_to_toss %>%
+  write_csv("csv_outputs/drop_outs_missing_data.csv")
+
+inds_to_toss %>%
+  left_join(., meta) %>%
+  select(sampleID, SBNDID, `BandY/N`, reference) %>%
+  unique() %>%
+  filter(`BandY/N` == T)
+```
+
 
 
 ```{r}
-63/959
+62/948
 ```
-6.6% of samples were dropped bec of missing data.
+6.5% of samples were dropped bec of missing data.
 
 Take a look at that dataset
 
 ```{r}
 genos_locs_ind_filtered  %>%
-  ggplot(aes(x = reorder(locus, depth), y = reorder(sampleID, depth), fill = log10(depth))) +
-  geom_tile()
+  ggplot(aes(y = reorder(locus, depth), x = reorder(sampleID, depth), fill = log10(depth))) +
+  geom_tile() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.text.x = element_text(size = 3, angle = 90, hjust = .95)
+  )
+
+ggsave("pdf_outputs/bfal_heatmap.pdf", height = 6, width = 26)
+```
+
+```{r}
+genos_locs_ind_filtered %>%
+  select(sampleID) %>%
+  unique() %>%
+  left_join(., meta) %>%
+  select(sampleID, SBNDID, `BandY/N`, reference) %>%
+  unique() %>%
+  filter(is.na(reference) | `BandY/N` == T) 
 
 ```
 
@@ -341,13 +395,13 @@ Rather than using self-assignment, I need to look at the leave-one-out assessmen
 
 
 
-```{r loo-output, eval=FALSE}
+```{r loo-output, eval=TRUE}
 loo_output <- rubias::assess_reference_loo(ref_two_col, gen_start_col = 5, return_indiv_posteriors = T)
 
 
 ref_two_col %>%
   group_by(repunit) %>%
-  tally()
+  tally() 
 
 ```
 
@@ -377,20 +431,21 @@ ggsave("pdf_outputs/LOO_simulated_proportions_group.pdf", width = 10, height = 5
 
 
 ```{r plot-diff-between-simulated-and-inferred}
-ggplot(BFAL_resum, aes(x = repu_n_prop, # Prop of ind. actually simulated 
+SI_fig2a <- ggplot(BFAL_resum, aes(x = repu_n_prop, # Prop of ind. actually simulated 
                      y = Diff, #inferred proportion
                      colour = repunit)) +
   geom_point() +
   geom_hline(yintercept = 0.1,lty=2,col=2) +
   geom_hline(yintercept = - 0.1,lty=2,col=2) +
   theme_bw()  +
-  labs(y = "Difference between simulated & inferred mixture proportion",
+  labs(y = "Simulated - inferred mixture proportion",
        x = "True proportion of simulated reporting group",
        color = "Reporting group") +
   theme(
     axis.title.x = element_text(margin = margin(t = 10)),
     axis.title.y = element_text(margin = margin(r = 10))
   )
+
 
 ```
 
@@ -404,14 +459,14 @@ loo_top_pofz <- loo_output$indiv_posteriors %>%
 
 
 # plot individual posteriors for LOO
-loo_top_pofz %>%
+SI_fig2b <- loo_top_pofz %>%
   filter(PofZ > 0.90) %>%
   group_by(simulated_repunit, repunit) %>%
   ggplot(aes(x = simulated_repunit, fill = repunit)) +
   geom_bar(stat = "count", position = "stack") +
   theme_minimal() +
   labs(x = "Simulated reporting group",
-       y = "Number of simulated samples",
+       y = "Simulated samples",
        fill = "Assigned reporting group") +
   scale_fill_manual(values = c("#74c476", "dodgerblue", "darkgreen", "darkslateblue", "tomato")) +
   theme(
@@ -424,6 +479,15 @@ ggsave("pdf_outputs/LOO_indiv_posteriors90.pdf", width = 8, height = 5)
   
 
 ```
+
+```{r si-figure-2}
+# make Figure for SI from simulated data
+SI_fig2a + SI_fig2b + plot_layout(nrow = 2) + plot_annotation(tag_levels = "A")
+
+ggsave("pdf_outputs/SI_figureS2.png", width = 6, height = 8)
+```
+
+
 Summarize those results:
 
 ```{r summarize-LOO-results-at-90-PofZ}
@@ -484,11 +548,33 @@ selfassigned %>%
 Kind of a sad distribution with so few samples (Laysan, Midway), but at least they're all centered between -3 and 2.
 
 
+```{r Self-assignment-table}
+# We don't have the ability to remove the ascertainment samples, so probably better to use the simulations instead.
+selfass_nothresh <- selfassigned %>%
+  group_by(indiv) %>%
+  slice_max(., order_by = scaled_likelihood) %>%
+  group_by(collection, inferred_collection) %>%
+  tally(name = "no threshold")
+  
+selfass_90thresh <- selfassigned %>%
+  group_by(indiv) %>%
+  slice_max(., order_by = scaled_likelihood) %>%
+  filter(scaled_likelihood >= 0.9) %>%
+  group_by(collection, inferred_collection) %>%
+  tally(name = "0.9 prob")
+
+  
+selfass_90thresh %>%
+  left_join(., selfass_nothresh)
+```
+
+
+
 Sample sizes:
 ```{r think-more-deeply-about-sample-sizes}
 ref_two_col %>%
   group_by(repunit) %>%
-  tally()
+  tally() 
 ```
 Figure 4 from the DeSaix et al. WGSassign paper has me thinking about the systematic bias created by unequal sample sizes. In this case, assuming that allele frequency estimates are independent of read depths because in each case, depths are sufficient to call genotypes (rather than using genotype-likelihoods).
 
@@ -498,13 +584,13 @@ What happens if we equalize sample size to 7 for the Laysan birds?
 
 ```{r equalize-sample-sizes}
 # set seed for reproducibility of random sampling
-set.seed(359)
-
-# downsample to equalize source population sizes
-test_loo <- ref_two_col %>%
-  group_by(repunit) %>%
-  sample_n(size = 7, replace = F) %>%
-  ungroup()
+# set.seed(359)
+# 
+# # downsample to equalize source population sizes
+# test_loo <- ref_two_col %>%
+#   group_by(repunit) %>%
+#   sample_n(size = 7, replace = F) %>%
+#   ungroup()
 ```
 
 
@@ -551,7 +637,7 @@ test_loo <- ref_two_col %>%
 
 ```{r test-loo-function}
 # equal sample sizes
-test_loo_ss(test_loo)
+# test_loo_ss(test_loo)
 
 ```
 
@@ -563,25 +649,25 @@ Try doing the same thing, but with higher sample sizes (10 inds, except for Lays
 # this might change things substantially because 7 samples vs. 10 samples is a 30% difference in the amount of data available for estimating allele frequencies
 
 # set seed for reproducibility of random sampling
-set.seed(765)
-
-# downsample to equalize source population sizes
-tmp1 <- ref_two_col %>%
-  filter(repunit != "Laysan") %>% # exclude Laysan birds and then add them back on
-  group_by(repunit) %>%
-  sample_n(size = 10, replace = F) %>%
-  ungroup()
-
-test_loo10 <- ref_two_col %>%
-  filter(repunit == "Laysan") %>%
-  bind_rows(tmp1)
-
-test_loo_ss(test_loo10)
+# set.seed(765)
+# 
+# # downsample to equalize source population sizes
+# tmp1 <- ref_two_col %>%
+#   filter(repunit != "Laysan") %>% # exclude Laysan birds and then add them back on
+#   group_by(repunit) %>%
+#   sample_n(size = 10, replace = F) %>%
+#   ungroup()
+# 
+# test_loo10 <- ref_two_col %>%
+#   filter(repunit == "Laysan") %>%
+#   bind_rows(tmp1)
+# 
+# test_loo_ss(test_loo10)
 
 ```
 
 ```{r original-reference-data}
-test_loo_ss(ref_two_col)
+# test_loo_ss(ref_two_col)
 
 ```
 
@@ -635,6 +721,48 @@ ref <- tmp_combo %>%
 
 ```
 
+```{r accounting-for-sample-numbers}
+drop_outs <- genos_no_dups  %>%
+  select(sampleID) %>%
+  unique() %>%
+  anti_join(., mix_two_col, by = c("sampleID" = "indiv")) %>%
+  anti_join(., ref_pops)
+
+drop_outs_w_meta <- drop_outs %>%
+  left_join(., meta) %>%
+  select(sampleID, population, reference, FisheriesName, `BandY/N`, Location) %>%
+  unique()
+
+drop_outs_w_meta %>%
+  filter(`BandY/N` == "TRUE")
+
+# What about samples that dropped out and were part of the baseline?
+ref_tossed <- inds_to_toss %>%
+  select(sampleID) %>%
+  unique() %>%
+  left_join(., meta) %>%
+  select(sampleID, population, reference, FisheriesName, `BandY/N`, Location) %>%
+  unique() %>%
+  filter(!is.na(population))
+
+# accounting in the reference samples
+ref_pops %>%
+  anti_join(., ref_tossed) %>%
+  anti_join(., ref_two_col, by = c("sampleID" = "indiv"))
+
+
+# bycatch tossed
+inds_to_toss %>%
+  select(sampleID) %>%
+  unique() %>%
+  left_join(., meta) %>%
+  select(sampleID, population, reference, FisheriesName, `BandY/N`, Location) %>%
+  unique() %>%
+  filter(is.na(population) &
+           `BandY/N` == "TRUE")
+
+```
+That one Laysan bird was removed from the baseline because it looked genetically like the samples that were mis-identified as BFAL, but were actually Laysan Albatross.
 
 
 ```{r perform-mixture-assignment-rubias}
@@ -665,7 +793,7 @@ mix_assigned %>%
 
 ```
 
-757 bycatch birds (this is minus missing data, -129 in the reference populations)
+757 bycatch birds (this is minus missing data, -129 in the reference populations) **We have 126 in the reference pops, right??
 
 78.7% of bycatch assigned at >90%
 
@@ -719,10 +847,28 @@ mix_assigned %>%
 
 ```
 
-There are 20 samples 
+
 
 
 ```{r}
+# assignments below the threshold?
+mix_assigned %>%
+  filter(z_score < -3) %>%
+  group_by(repunit, collection) %>%
+  tally()
+  
+mix_assigned %>%
+  filter(PofZ < 0.9) %>%
+  group_by(collection) %>%
+  tally()
+
+mix_assigned %>%
+  filter(PofZ < 0.9 | z_score < -3) %>%
+  select(indiv) %>%
+  left_join(., meta, by = c("indiv" = "sampleID")) %>%
+  filter(`BandY/N` == T)
+  #write_csv("csv_outputs/GSI_below_assign_threshold.csv")
+
 # What about the rest of the distribution?
 mix_assigned_to_keep <- mix_assigned %>%
   filter(PofZ > 0.9 &
@@ -745,6 +891,17 @@ mix_assigned_to_keep %>%
 ggsave("pdf_outputs/assigned_bycatch_PofZ90_zscore3.pdf")
 ```
 576 samples assigned at > 0.9 PofZ and within 3 sd of the mean (z-scores)
+
+```{r total-banded-birds-for-accounting}
+genotyped_w_loc_info %>%
+  filter(`BandY/N` == TRUE) %>%
+  filter(!is.na(Location)) %>%
+  group_by(`Loc-Abbr`) %>%
+  tally()
+
+```
+What does it mean if a bird is banded, but there's no location information?
+
 
 ```{r}
 # bycatch_dataset <- mix_assigned %>%
@@ -791,12 +948,13 @@ bycatch_assignments %>%
 bycatch_assignments %>%
   filter(!str_detect(sampleID, "BFAL")) %>%
   filter(is.na(reference)) %>% # remove the reference samples
-  filter(is.na(collection))
+  filter(is.na(collection)) %>%
+  filter(`BandY/N` == F)
 
 ```
 
 Final accounting:
-950 total bycatch + reference samples
+948 total bycatch + reference samples
 858 bycatch samples
 757 bycatch samples in the rubias analysis
 576 bycatch with assignments >0.9 PofZ and > -3 z-scores
@@ -825,6 +983,29 @@ final_output <- tmp2 %>% bind_rows(., missing_data_inds)
 ```
 
 
+```{r summarise-final-output-by-fishery}
+gsi_out <- final_output %>%
+  filter(PofZ > 0.9 &
+           z_score > -3)
+
+banded_out <- final_output %>%
+  filter(`BandY/N` == T)
+
+bind_rows(banded_out, gsi_out) %>%
+  group_by(sampleID, `BandY/N`) %>%
+  tally() %>%
+  filter(n >1)
+  
+```
+69 banded birds that also meet the GSI criteria.
+
+```{r}
+banded_out %>%
+  bind_rows(gsi_out) %>%
+  unique() %>%
+  write_csv("BFAL_GSI_bands_output_20231208.csv")
+```
+
 
 ## Reconsidering mixture assignment with unequal sample sizes
 
@@ -839,29 +1020,29 @@ Just to test...
 
 
 ```{r test-bycatch-assignment-w-equal-source-pop-sample-sizes}
-# set function
-bycatch_assign_test <- function(reference){    
-    # mixture analysis
-    bycatch_assign <- rubias::infer_mixture(reference = reference, mixture = mix, gen_start_col = 5)
-    
-    mix_assigned <- bycatch_assign$indiv_posteriors %>%
-      group_by(indiv) %>%
-      slice_max(., order_by = PofZ) #%>% # But the Laysan assignments are actually mistaken samples that came from Laysan albatross
-      #filter(!indiv %in% c("11-0626", "11-0628", "16-0412", "16-0413", "19-0314", "12-0369"))
-    
-    # by repunit/collection
-    mix_output <- mix_assigned %>%
-      filter(PofZ > 0.9 &
-               z_score > -3) %>%
-      group_by(repunit) %>%
-      tally()
-    
-    print(mix_output)
-    
-}
-
-# equal sizes (7 inds per source pop)
-bycatch_eq_source_pops <- bycatch_assign_test(test_loo10)
+# # set function
+# bycatch_assign_test <- function(reference){    
+#     # mixture analysis
+#     bycatch_assign <- rubias::infer_mixture(reference = reference, mixture = mix, gen_start_col = 5)
+#     
+#     mix_assigned <- bycatch_assign$indiv_posteriors %>%
+#       group_by(indiv) %>%
+#       slice_max(., order_by = PofZ) #%>% # But the Laysan assignments are actually mistaken samples that came from Laysan albatross
+#       #filter(!indiv %in% c("11-0626", "11-0628", "16-0412", "16-0413", "19-0314", "12-0369"))
+#     
+#     # by repunit/collection
+#     mix_output <- mix_assigned %>%
+#       filter(PofZ > 0.9 &
+#                z_score > -3) %>%
+#       group_by(repunit) %>%
+#       tally()
+#     
+#     print(mix_output)
+#     
+# }
+# 
+# # equal sizes (7 inds per source pop)
+# bycatch_eq_source_pops <- bycatch_assign_test(test_loo10)
 ```
 
 
@@ -876,19 +1057,22 @@ Given that, I'm going to test what the assignments are if I remove Laysan from t
 
 ```{r remove-laysan-and-equalize-pops}
 # set seed for reproducibility of random sampling
-set.seed(359)
-
-# downsample to equalize source population sizes
-test_loo_noLaysan <- ref_two_col %>%
-  group_by(repunit) %>%
-  filter(repunit != "Laysan") %>%
-  #sample_n(size = 17, replace = F) %>%
-  ungroup()
-
-test_loo_ss(test_loo_noLaysan)
+# set.seed(359)
+# 
+# # downsample to equalize source population sizes
+# test_loo_noLaysan <- ref_two_col %>%
+#   group_by(repunit) %>%
+#   filter(repunit != "Laysan") %>%
+#   #sample_n(size = 17, replace = F) %>%
+#   ungroup()
+# 
+# test_loo_ss(test_loo_noLaysan)
 ```
+
+
+
 ```{r}
-bycatch_assign_test(test_loo_noLaysan)
+# bycatch_assign_test(test_loo_noLaysan)
 
 ```
 
