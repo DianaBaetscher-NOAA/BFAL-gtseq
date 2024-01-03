@@ -1,0 +1,982 @@
+---
+title: "clean-analysis-updated-metadata"
+author: "diana baetscher"
+date: "2023-12-20"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+19 December 2023
+
+
+```{r load-libraries}
+library(tidyverse)
+library(readxl)
+library(stringr)
+library(lubridate)
+library(rubias)
+library(patchwork)
+library(dplyr)
+
+
+source("../R/rubias_MultChains.R")
+```
+
+```{r read-in-bycatch-data}
+# latest, most complete version of the metadata!
+meta_from_jessie <- read_csv("../data/BFALonly_all_bycatch_genotyped_fromJessie.csv")
+bycatch_metadata <- meta_from_jessie %>%
+  mutate(sampleID = str_replace(sampleID, "008-", "08-"))
+
+bycatch_metadata %>%
+  group_by(`BandY/N`) %>%
+  tally()
+
+# read in samplesheet dataframe
+all_samples_gtseq <- read_csv("csv_outputs/BFAL_gtseq_samplesheet_df.csv")
+
+```
+
+855 bycatch samples
+704 not banded
+151 banded
+
+```{r read-in-reference-samples-metadata}
+# metadata for reference samples used for lcWGS
+# ref_pops <- readxl::read_xlsx("../data/BFAL_WGS_01_finalPlateMap.xlsx", sheet = "combinedPlate1And2SamplePops") %>%
+#   mutate(reference = TRUE) %>%
+#   rename(sampleID = ind_ID)
+#   
+# # 137 original reference samples
+# # used for lcWGS
+# 
+# ref_samplelist <- read_csv("../data/gtseq5_samplelist.csv") %>%
+#   mutate(gtseq_run = "gtseq5") %>%
+#   rename(id = sample)
+# 
+# # just the reference samples that are not from bycatch
+# # (non-Jessie sources)
+# reference_meta_wo_banded <- ref_pops %>%
+#   left_join(., ref_samplelist, by = c("sampleID" = "Sample_ID")) %>%
+#   filter(str_detect(sampleID, "BFAL-")) %>% # just the reference samples that came from non-Jessie sources (not banded birds)
+#   rename(Location = population) %>%
+#   mutate(Location = ifelse(Location == "Kure", "Kure Atoll, Honolulu County, Hawaii", Location)) %>%
+#    mutate(Location = ifelse(Location == "Midway", "Midway Atoll, NWHI, HI", Location)) %>%
+#       mutate(Location = ifelse(Location == "Torishima", "Torishima Island, Japan", Location)) %>%
+#        mutate(`Loc-Abbr` = ifelse(Location == "Midway Atoll, NWHI, HI", "NWHI, Midway", NA)) %>%
+#         mutate(`Loc-Abbr` = ifelse(Location == "Torishima Island, Japan", "Japan, Torishima", `Loc-Abbr`)) %>%
+#             mutate(`Loc-Abbr` = ifelse(Location == "Kure Atoll, Honolulu County, Hawaii", "NWHI, Kure", `Loc-Abbr`)) 
+#   
+# reference_meta_wo_banded
+
+```
+
+
+
+```{r read-in-genos-and-filter}
+# remove the loci that had deviations from HWE in the majority of populations
+loci_to_keep <- read_csv("csv_outputs/loci_to_keep_hwe.csv")
+
+# read in rds file with genotypes
+genos_NA_explicit <- read_rds("../data/processed/called_genos_na_explicit.rds") %>%
+  inner_join(., loci_to_keep)
+
+# list of reference samples
+genos_long <- genos_NA_explicit %>%
+  left_join(., all_samples_gtseq) %>%
+  select(gtseq_run, id, locus, gene_copy, allele, depth, allele.balance, sampleID, pop, reference)
+# 
+# # quick list of the reference samples and their respective populations
+# ref_pops <- genos_long %>%
+#   filter(!is.na(reference)) %>%
+#   dplyr::select(sampleID, population, Location) %>%
+#   unique()
+
+```
+
+## Some initial filters
+
+### Take highest read-depth call for multiply-genotyped DNA_IDs
+
+We know there are 83 duplicate samples.
+
+
+Now, here is a harder operation: if an individual is multiply-genotyped, take the
+genotype with the highest total read depth.  
+```{r take-just-one}
+# slow-ish function to get the total read depth column
+tdepth <- function(a, d) {
+  if(any(is.na(a))) {
+    return(NA)
+  }
+  if(a[1]==a[2]) {
+    return(d[1])
+  } else {
+    return(d[1] + d[2])
+  }
+  
+}
+# this takes the highest read-depth instance of each duplicately-genotyped individual.
+geno_one_each <- genos_long %>%
+  group_by(sampleID, locus, gtseq_run, id) %>%
+  mutate(total_depth = tdepth(allele, depth)) %>%
+  ungroup() %>% 
+  arrange(sampleID, locus, desc(total_depth), gtseq_run, depth) %>%
+  group_by(sampleID, locus) %>%
+  mutate(rank = 1:n()) %>% # this ranks all alleles for a given individual by depth
+  ungroup() %>%
+  filter(rank <= 2) # this takes the top ranked alleles and should remove duplicates
+  
+
+# how many samples now?
+geno_one_each %>%
+  filter(!is.na(sampleID)) %>%
+  group_by(sampleID) %>% 
+  select(sampleID, gtseq_run, id) %>%
+  unique() %>%
+  tally() %>%
+  filter(n>1) 
+
+geno_one_each %>%
+  filter(!is.na(sampleID)) %>%
+  select(sampleID) %>%
+  unique()
+
+# use this df to eliminate issues with duplication
+genos_no_dups <- geno_one_each %>%
+  select(-gtseq_run, -id, -total_depth, -rank) %>%
+  filter(!is.na(sampleID)) # remove the sample with no sampleID
+# this includes bycatch that was genotyped, but are not in the bycatch metadata because they are LAAL
+
+
+```
+
+## Locus evaluation
+
+How many loci and how many alleles?
+
+```{r}
+# alleles
+genos_no_dups %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique() %>%
+  arrange(locus)
+
+# loci
+genos_no_dups %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique() %>%
+  group_by(locus) %>%
+  tally() %>%
+  arrange(desc(n))
+
+```
+
+458 alleles across 182 loci with between 1-8 alleles per locus.
+
+quick look at the loci with only 1 allele:
+```{r remove-monomorphic-loci}
+monomorphic <- genos_no_dups %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique() %>%
+  group_by(locus) %>%
+  tally() %>%
+  filter(n == 1) %>%
+  left_join(., genos_no_dups) %>%
+  select(locus, allele) %>%
+  unique() %>%
+  filter(!is.na(allele)) %>%
+  select(locus)
+
+polymorphic_no_dups <- genos_no_dups %>%
+  anti_join(., monomorphic)
+
+```
+
+
+Missing data:
+
+(948 inds)
+959 individuals * 2 alleles per locus **this is now 948 individuals after removing Laysan birds from metadata. I'm keeping the analysis as-is to avoid too much confusion.
+
+50% missing data per locus = 959
+```{r}
+# missing data across loci
+locs_to_toss <- polymorphic_no_dups %>%
+  group_by(locus) %>%
+  mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
+  summarise(sum(missingness)) %>% 
+  filter(`sum(missingness)`>959) %>% # more than 50% missing data
+  select(locus) # drop those loci for now and see how the assignment goes
+
+# just the keepers
+genos_locs_filtered <- polymorphic_no_dups %>%
+  anti_join(., locs_to_toss)
+
+```
+Drop 3 loci with > 50% missing data.
+
+That brings the number of loci down to 168. (11 were monomorphic)
+
+```{r}
+# summary of remaining loci
+genos_locs_filtered %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique()
+
+genos_locs_filtered %>%
+  filter(!is.na(allele)) %>%
+  select(locus, allele) %>%
+  unique() %>%
+  group_by(locus) %>%
+  tally() %>%
+  arrange(desc(n))
+
+```
+
+First, look at the loci for missingness and \>2 haplotypes in an individual [This might be masked by the function that reads in the rds file??]
+
+```{r}
+polymorphic_no_dups %>%
+  group_by(sampleID, locus) %>% # there should be no more than 2 alleles for a given indiv/locus
+  tally() %>%
+  filter(n > 2)
+
+```
+
+## Missing data in individuals
+
+Total number of loci = 168
+
+```{r remove-inds-w-missing-data}
+inds_to_toss <- genos_locs_filtered %>%
+  group_by(sampleID) %>%
+  mutate(missingness = ifelse(is.na(allele), 1, 0)) %>%
+  summarise(sum(missingness)) %>%
+  arrange(desc(`sum(missingness)`)) %>%
+  filter(`sum(missingness)` > 85) # remove samples with >25% missing data
+
+# just the keepers
+genos_locs_ind_filtered <- genos_locs_filtered %>%
+  anti_join(., inds_to_toss)
+
+```
+
+64 samples had >25% missing data
+But 13 of those samples are banded, so that should mean only 51 drop-outs from the bycatch because of missing data.
+```{r output-inds-missing-data}
+inds_to_toss %>%
+  left_join(., bycatch_metadata) %>%
+  select(sampleID, `BandY/N`) %>%
+  unique() %>%
+  filter(`BandY/N` == T)
+
+```
+
+```{r make-heatmap-of-filtered-genos}
+genos_locs_ind_filtered  %>%
+  ggplot(aes(y = reorder(locus, depth), x = reorder(sampleID, depth), fill = log10(depth))) +
+  geom_tile() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.text.x = element_text(size = 3, angle = 90, hjust = .95)
+  )
+
+#ggsave("pdf_outputs/bfal_heatmap.pdf", height = 6, width = 26)
+```
+
+
+## Leave-one-out assignment of source populations
+
+
+Doing a sanity check with the reference baseline
+
+```{r format-reference-baseline-for-rubias}
+# first make integers of the alleles
+alle_idxs <- genos_locs_ind_filtered %>% 
+  filter(!is.na(sampleID)) %>%
+  dplyr::select(sampleID, locus, gene_copy, allele, pop, reference) %>%
+  group_by(locus) %>%
+  mutate(alleidx = as.integer(factor(allele, levels = unique(allele)))) %>%
+  ungroup() %>%
+  arrange(sampleID, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
+
+
+## get the allele indexes for just the reference populations
+
+# format for rubias
+reference <- alle_idxs %>%
+  filter(!is.na(reference)) %>%
+  select(-allele, -reference) %>%
+  select(pop, sampleID, everything()) %>%
+  rename(collection = pop, indiv = sampleID)
+
+# make two-col format
+ref_two_col <- reference %>%
+  unite("loc", 3:4, sep = ".") %>%
+  pivot_wider(names_from = loc, values_from = alleidx) %>%
+  mutate(repunit = collection) %>%
+  mutate(sample_type = "reference") %>%
+  select(sample_type, repunit, collection, everything()) %>% # modify repunit info for Whale-Skate and Tern, which should be a single repunit for the French Frigate Shoals
+  mutate(repunit = ifelse(collection %in% c("Tern", "Whale-Skate"), "FFS", repunit)) %>%
+  filter(repunit != "Lehua") %>%
+  filter(indiv != "21-0173") # remove the z-score outlier from the self-assignment (Laysan bird)
+
+```
+126 reference samples retained.
+
+
+A little background here:
+
+Rather than using self-assignment, I need to look at the leave-one-out assessment because I know that doing self-assignment with my reference being identical to my ascertainment samples is going to be upwardly biased.
+
+
+
+## Leave one out assessment for the baseline
+
+```{r loo-output, eval=TRUE}
+loo_output <- rubias::assess_reference_loo(ref_two_col, gen_start_col = 5, return_indiv_posteriors = T)
+
+```
+
+```{r plot-results-from-LOO}
+BFAL_resum<-loo_output$mixing_proportions %>%
+  group_by(iter, repunit) %>%
+  summarise(true_repprop = sum(true_pi), 
+            reprop_posterior_mean = sum(post_mean_pi),
+            repu_n = sum(n)) %>%
+  mutate(repu_n_prop = repu_n / sum(repu_n))%>%
+  mutate(Diff = reprop_posterior_mean - repu_n_prop)
+
+ggplot(BFAL_resum, aes(x = repu_n_prop, # Prop of ind. actually simulated 
+                     y = reprop_posterior_mean, #inferred proportion
+                     colour = repunit)) +
+  geom_point(alpha = 0.7) +
+  geom_abline(intercept = 0, slope = 1) +
+  facet_grid(cols = vars(repunit)) +
+  labs(y = "Inferred Proporiton",
+       x = "True Proportion",
+       color = "Reporting group")+
+  theme_bw()
+
+ggsave("pdf_outputs/LOO_simulated_proportions_group.pdf", width = 10, height = 5)
+```
+
+```{r plot-diff-between-simulated-and-inferred}
+SI_fig2a <- ggplot(BFAL_resum, aes(x = repu_n_prop, # Prop of ind. actually simulated 
+                     y = Diff, #inferred proportion
+                     colour = repunit)) +
+  geom_point() +
+  geom_hline(yintercept = 0.1,lty=2,col=2) +
+  geom_hline(yintercept = - 0.1,lty=2,col=2) +
+  theme_bw()  +
+  labs(y = "Simulated - inferred mixture proportion",
+       x = "True proportion of simulated reporting group",
+       color = "Reporting group") +
+  theme(
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
+
+```
+
+
+At the individual level...
+
+```{r plot-individual-PofZ-for-LOO}
+# top p of z for each simulated individual
+loo_top_pofz <- loo_output$indiv_posteriors %>%
+  group_by(repunit_scenario, collection_scenario, iter, indiv, simulated_repunit, simulated_collection) %>%
+  slice_max(., order_by = PofZ)
+
+
+# plot individual posteriors for LOO
+SI_fig2b <- loo_top_pofz %>%
+  filter(PofZ > 0.90) %>%
+  group_by(simulated_repunit, repunit) %>%
+  ggplot(aes(x = simulated_repunit, fill = repunit)) +
+  geom_bar(stat = "count", position = "stack") +
+  theme_minimal() +
+  labs(x = "Simulated reporting group",
+       y = "Simulated samples",
+       fill = "Assigned reporting group") +
+  scale_fill_manual(values = c("#74c476", "dodgerblue", "darkgreen", "darkslateblue", "tomato")) +
+  theme(
+    axis.title.x = element_text(margin = margin(t=10)),
+      axis.title.y = element_text(margin = margin(r = 10))
+  )
+  
+
+ggsave("pdf_outputs/LOO_indiv_posteriors90.pdf", width = 8, height = 5)
+  
+```
+
+```{r si-figure-2}
+# make Figure for SI from simulated data
+SI_fig2a + SI_fig2b + plot_layout(nrow = 2) + plot_annotation(tag_levels = "A")
+
+ggsave("pdf_outputs/SI_figureS2.png", width = 6, height = 8)
+```
+
+Summarize those results:
+```{r summarize-LOO-results-at-90-PofZ}
+simulated <- loo_top_pofz %>%
+  filter(PofZ > 0.90) %>%
+  group_by(simulated_repunit) %>%
+  tally(name = "total_per_repunit")
+
+
+loo_top_pofz %>%
+  filter(PofZ > 0.90) %>%
+  group_by(simulated_repunit, repunit) %>%
+  tally(name = "assigned_n") %>%
+  mutate(correct = ifelse(simulated_repunit == repunit, "TRUE", "FALSE")) %>%
+  left_join(., simulated, by = "simulated_repunit") %>%
+  mutate(perc_correct = assigned_n/total_per_repunit)
+
+```
+
+100% correct assignment to Torishima
+99.9% correct assignment to FFS
+99% correct assignment to Midway
+98.8% correct to Laysan
+88.7% correct to Kure
+
+highest misassignments = 
+6.5% misassigned from Kure to FFS
+4.8% misassigned from Kure to Midway
+1% misassigned from Midway to Kure and from Laysan to Midway
+
+
+
+
+#### self-assignment to generate z-score distributions
+
+```{r}
+selfassigned <- rubias::self_assign(ref_two_col, gen_start_col = 5)
+
+selfassigned %>%
+  group_by(indiv) %>%
+  slice_max(., order_by = scaled_likelihood) %>%
+  ggplot(aes(x = z_score)) +
+  geom_histogram() +
+  facet_grid(rows = vars(repunit))
+  
+```
+
+
+
+```{r Self-assignment-table}
+# We don't have the ability to remove the ascertainment samples, so probably better to use the simulations instead.
+selfass_nothresh <- selfassigned %>%
+  group_by(indiv) %>%
+  slice_max(., order_by = scaled_likelihood) %>%
+  group_by(collection, inferred_collection) %>%
+  tally(name = "no threshold")
+  
+selfass_90thresh <- selfassigned %>%
+  group_by(indiv) %>%
+  slice_max(., order_by = scaled_likelihood) %>%
+  filter(scaled_likelihood >= 0.9) %>%
+  group_by(collection, inferred_collection) %>%
+  tally(name = "0.9 prob")
+
+  
+selfass_90thresh %>%
+  left_join(., selfass_nothresh)
+```
+
+Sample sizes:
+```{r think-more-deeply-about-sample-sizes}
+ref_two_col %>%
+  group_by(repunit) %>%
+  tally() 
+```
+
+Figure 4 from the DeSaix et al. WGSassign paper has me thinking about the systematic bias created by unequal sample sizes. In this case, assuming that allele frequency estimates are independent of read depths because in each case, depths are sufficient to call genotypes (rather than using genotype-likelihoods).
+
+We shouldn't have any problem assigning samples correctly to Torishima because of the relatively high genetic differentiation between Japanese and Hawaiian colonies (Fst > 0.03).
+
+What happens if we equalize sample size to 7 for the Laysan birds?
+
+
+
+## Mixture bycatch assignment
+
+
+```{r make-alleles-df}
+# format for rubias
+mix_idx <- alle_idxs %>%
+  anti_join(., ref_two_col, by = c("sampleID" = "indiv")) %>%
+  select(-allele, -pop, -reference) %>%
+  mutate(collection = "bycatch") %>%
+  rename(indiv = sampleID) %>%
+  unique()
+
+# confirming no duplicates that would prevent rubias from working
+mix_idx %>%
+  unite("loc", 2:3, sep = ".") %>%
+  dplyr::group_by(indiv, collection, loc) %>%
+    dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
+    dplyr::filter(n > 1L)
+
+```
+
+```{r create-two-column-format-for-rubias}
+# make two-col format
+mix_two_col <- mix_idx %>%
+  arrange(indiv, locus, gene_copy) %>%
+  unite("loc", 2:3, sep = ".") %>%
+  pivot_wider(names_from = loc, values_from = alleidx) %>%
+  mutate(repunit = NA) %>%
+  mutate(sample_type = "mixture") %>%
+  select(sample_type, repunit, collection, everything())
+
+# formatting for compatibility
+tmp_combo <- bind_rows(ref_two_col, mix_two_col)
+
+mix <- tmp_combo %>%
+  filter(sample_type == "mixture")
+
+ref <- tmp_combo %>%
+  filter(sample_type == "reference")
+
+```
+
+```{r perform-mixture-assignment-rubias}
+# mixture analysis
+bycatch_assign <- rubias::infer_mixture(reference = ref, mixture = mix, gen_start_col = 5)
+
+mix_assigned <- bycatch_assign$indiv_posteriors %>%
+  group_by(indiv) %>%
+  slice_max(., order_by = PofZ) #%>% # But the Laysan assignments are actually mistaken samples that came from Laysan albatross
+  #filter(!indiv %in% c("11-0626", "11-0628", "16-0412", "16-0413", "19-0314", "12-0369"))
+
+# by repunit/collection
+mix_assigned %>%
+  group_by(repunit) %>%
+  tally() 
+
+```
+
+771 birds in the GSI bycatch analysis.
+
+#### investigate z-score outliers
+```{r z-score outliers}
+# are there banded birds within the z-score outliers?
+mix_assigned %>%
+  filter(z_score < -3) %>%
+  left_join(., bycatch_metadata, by = c("indiv" = "sampleID")) %>%
+  filter(`BandY/N` == T)
+
+# move the threshold to -3.5 to accommodate the known, banded birds.
+mix_assigned %>%
+  filter(z_score < -3.5)
+
+# the only banded outlier is a Laysan bird, which matches our assumptions about banding and that colony
+mix_assigned %>%
+  filter(z_score < -3.5) %>%
+  inner_join(., bycatch_metadata, by = c("indiv" = "sampleID")) %>%
+  filter(`BandY/N` == F) %>%
+  group_by(repunit)
+
+```
+
+#### assignment threshold
+
+```{r probability-of-assignment-thresholds}
+mix_assigned %>%
+  filter(z_score > -3.5) %>%
+  filter(PofZ > 0.9)
+
+# assignments by colony
+mix_assigned %>%
+  filter(PofZ > 0.9 &
+           z_score > -3.5) %>%
+  group_by(repunit) %>%
+  tally()
+
+# unassigned
+mix_assigned %>%
+  filter(PofZ < 0.9) %>%
+  group_by(repunit) %>%
+  tally()
+
+mix_assigned %>%
+  filter(z_score < -3.5) %>%
+  left_join(., meta_from_jessie, by = c("indiv" = "sampleID"))
+```
+
+```{r make-SI-table-S2}
+mix_assigned %>%
+  filter(z_score > -3.5) %>%
+  group_by(repunit) %>%
+  add_tally(name = "no assignment threshold") %>%
+  filter(PofZ > 0.5) %>%
+  add_tally(name = "PofZ >0.5") %>%
+  filter(PofZ > 0.9) %>%
+  add_tally(name = "PofZ >0.9") %>%
+  dplyr::select(repunit, `no assignment threshold`, `PofZ >0.5`, `PofZ >0.9`) %>%
+  unique() %>%
+  write_csv("csv_outputs/gsi_assignments_SI_TableS2.csv")
+
+```
+
+
+
+```{r gsi-results-bycatch}
+# starting from the metadata df, 
+# add the gsi assignments - including those that will get filtered out bec of PofZ and z-score
+# and then account for the samples removed due to missing data filters
+bycatch_meta_results <- bycatch_metadata %>%
+  left_join(., mix_assigned, by = c("sampleID" = "indiv")) %>%
+  left_join(., inds_to_toss) %>%
+  mutate(n_miss_loci = ifelse(is.na(n_miss_loci), `sum(missingness)`, n_miss_loci)) %>%
+  select(-missing_loci, -`sum(missingness)`) #%>%
+  # mutate(note = ifelse(n_miss_loci >84, "filtered for missing data", NA)) %>%
+  # mutate(note = ifelse(z_score < -3.5, "filtered for z-score outlier", note))
+  
+
+bycatch_gsi_outputs <- bycatch_meta_results %>%
+  mutate(note = ifelse(z_score < -3.5, "z_score outlier", NA)) %>%
+  mutate(note = ifelse(PofZ < 0.9, "below PofZ threshold", note)) %>%
+  mutate(note = ifelse(n_miss_loci > 84, "missing data", note)) %>%
+  mutate(note = ifelse(`BandY/N` == T, "banded", note)) %>%
+  mutate(colony = ifelse(is.na(note), repunit, note)) %>%
+  mutate(colony = repunit) %>%
+  #select(colony, note, repunit, `Loc-Abbr`, sampleID) %>%
+  mutate(colony = ifelse(!is.na(`Loc-Abbr`), `Loc-Abbr`, colony)) %>%
+  mutate(colony = str_replace(colony, "NWHI, ", ""))
+
+bycatch_gsi_outputs %>%
+  write_csv("csv_outputs/bycatch_full_accounting_20231220.csv")
+
+bycatch_gsi_outputs %>%
+  filter(FisheriesName == "Alaska Groundfish fisheries")
+  
+```
+
+
+```{r gsi-results-accounting}
+# accounting
+bands_w_loc <- bycatch_gsi_outputs %>%
+  filter(note == "banded" & !is.na(`Loc-Abbr`))
+
+bands_wo_loc_w_gsi <- bycatch_gsi_outputs %>%
+  filter(note == "banded" & is.na(`Loc-Abbr`)) %>%
+  filter(z_score > -3.5 & PofZ > 0.9)
+
+not_banded_keepers <- bycatch_gsi_outputs %>%
+  filter(`BandY/N` == F) %>%
+  filter(n_miss_loci < 84) %>%
+  filter(z_score > -3.5 & PofZ > 0.9)
+  
+
+# combine all retained samples with their band/GSI assignments
+all_assignments <- bind_rows(not_banded_keepers, bands_w_loc, bands_wo_loc_w_gsi)
+
+all_assignments %>%
+  group_by(FisheriesName) %>%
+  tally()
+
+colony_assignments <- bycatch_gsi_outputs %>%
+  dplyr::select(-colony) %>%
+  left_join(., all_assignments) %>%
+  mutate(colony = ifelse(is.na(colony), "Unassigned", colony)) %>%
+  filter(CollYear >2009) # filtering down to 2010-2022 dataset with 639 indivs.
+
+# checking the number of samples removed by the year filter
+bycatch_gsi_outputs %>%
+  dplyr::select(-colony) %>%
+  left_join(., all_assignments) %>%
+  mutate(colony = ifelse(is.na(colony), "Unassigned", colony)) %>%
+  anti_join(., colony_assignments) %>% # 37 birds removed because they were pre-2010.
+  filter(note != "banded" & colony == "Unassigned") # 8 samples that were not banded that were not assigned 
+  
+# confirming the number of unassigned samples post-2010
+colony_assignments %>%
+   filter(note != "banded" & colony == "Unassigned")
+
+# data for table 2 using just data from 2010+
+colony_assignments %>%
+  mutate(colony = ifelse(colony %in% c("Kauai, Kilauea", "Kauai, Lehua", "Oahu"), "Other", colony)) %>%
+  group_by(FisheriesName, colony) %>%
+  #group_by(FisheriesName) %>%
+  #tally() %>%
+  #filter(str_detect(FisheriesName, "Hawaii")) %>%
+  group_by(colony) %>%
+  tally() 
+
+# all_assignments %>%
+#   write_csv("csv_outputs/BFAL_bycatch_assignments_passingfilter666.csv")
+
+```
+
+177 samples that were not banded and not assigned by GSI.
+179 samples that were not assigned by GSI (including two that were banded)
+
+
+
+
+### Using that GSI/band location output for figures
+
+
+```{r color-palette}
+# set colors
+mypalette <- c("dodgerblue", "#006d2c", "skyblue", "darkslateblue", "#74c476",  # Hawaii - greens, blues
+               "tomato", "#31a354") # Japan - red
+```
+
+```{r population-estimates}
+pop_est <- read_csv("../data/bfal_pop_estimates.csv")
+
+prop_total_pop <- pop_est %>%
+  filter(colony != "Total") %>%
+  mutate(total_pop = sum(population_estimate)) %>%
+  mutate(perc_of_total = population_estimate/total_pop) %>%
+  mutate(GenCollArea = "Total population") %>%
+  mutate(colony = colony_abbr) # fix this once we figure out what's needed for Lehua
+
+```
+Make barplot based on population proportions
+```{r barplot-proportions}
+final_bycatch_prop <- colony_assignments %>%
+  group_by(colony, GenCollArea) %>%
+  mutate(colony = ifelse(colony %in% c("Kauai, Kilauea", "Kauai, Lehua", "Oahu"), "Other", colony)) %>%
+  tally() %>%
+  arrange(GenCollArea) %>%
+  ungroup() %>%
+  group_by(GenCollArea) %>%
+  mutate(area_bycatch = sum(n)) %>%
+  group_by(colony, GenCollArea) %>%
+  mutate(col_bycatch_region = sum(n)) %>%
+  mutate(col_bycatch_region_prop = col_bycatch_region/area_bycatch) %>%
+  # calculate the bycatch proportions for all fisheries combined
+  ungroup() %>%
+  mutate(total_bycatch = sum(n)) %>%
+  group_by(colony) %>%
+  mutate(colony_total = sum(n)) %>%
+  mutate(perc_of_total = colony_total/total_bycatch) %>%
+  ungroup() 
+  
+all_fish_data <- final_bycatch_prop %>%
+  dplyr::select(colony, perc_of_total) %>%
+  mutate(GenCollArea = "All fisheries") %>%
+  unique()
+
+# add in proportion of total population
+prop_total_pop %>%
+  left_join(., final_bycatch_prop, by = c("colony_abbr" = "colony")) 
+
+
+combined_prop_df <- final_bycatch_prop %>%
+  bind_rows(., prop_total_pop) %>%
+  bind_rows(all_fish_data) %>%
+  mutate(col_bycatch_region_prop = ifelse(is.na(col_bycatch_region_prop), perc_of_total, col_bycatch_region_prop)) %>%
+  filter(!is.na(colony),
+         GenCollArea != "WA") %>%
+  mutate(GenCollArea = ifelse(GenCollArea == "AK", "Alaska fisheries", GenCollArea)) %>%
+    mutate(GenCollArea = ifelse(GenCollArea == "HI", "Hawaii fisheries", GenCollArea))
+
+  
+```
+Remove WA (low sample sizes)
+Add all fisheries combined (including WA)
+
+```{r barplot-with-proportions}
+area_order <- combined_prop_df$GenCollArea <- factor(combined_prop_df$GenCollArea, levels=c("Total population", "All fisheries", "Alaska fisheries", "Hawaii fisheries"))
+
+bycatchA <- combined_prop_df %>%
+  mutate(colony = ifelse(colony == "FFS", "French Frigate Shoals", colony)) %>%
+  ggplot(aes(x = GenCollArea, y = col_bycatch_region_prop, fill = colony)) +
+  geom_bar(stat = "identity", position = "stack", width = 0.7) +
+  theme_bw() +
+  labs(
+    fill = "BFAL breeding \ncolony",
+    y = "Proportion",
+    x = " "
+  ) +
+  scale_y_continuous(limits = c(0, 1), expand = c(0,0.01)) +
+  scale_fill_manual(values = c("#74c476", "dodgerblue", "#006d2c", "darkslateblue", "skyblue", "tomato", "gray")) +
+  theme(
+    axis.title.x = element_text(margin = margin(t=10)),
+      axis.title.y = element_text(margin = margin(r = 10))
+
+  )
+
+bycatchA
+
+ggsave("pdf_outputs/colony_bycatch_barplot.png", width = 7, height = 4)
+```
+
+Alternative plot with differences between the population and the fisheries:
+
+```{r difference-plot-for-comparison}
+# because I had to futz with the dataframe earlier, there are odds and ends out of place
+bycatch_diff <- combined_prop_df %>%
+  mutate(colony = ifelse(colony == "FFS", "French Frigate Shoals", colony)) %>%
+  dplyr::select(colony, GenCollArea, col_bycatch_region_prop) %>%
+  pivot_wider(names_from = "GenCollArea", values_from = col_bycatch_region_prop) %>%
+  pivot_longer(cols = c(`All fisheries`, `Alaska fisheries`, `Hawaii fisheries`), names_to = "fishery", values_to = "prop_bycatch") %>%
+  mutate(perc_diff = (prop_bycatch-`Total population`)*100) %>%
+  filter(!is.na(perc_diff)) 
+# reorder the factor
+bycatch_diff$fishery <- factor(bycatch_diff$fishery, levels= c("All fisheries", "Alaska fisheries", "Hawaii fisheries"))
+bycatch_diff$colony <- factor(bycatch_diff$colony, levels = c("French Frigate Shoals", "Kure", "Laysan", "Midway", "Torishima", 
+                                                              "Other"))
+
+bycatchB <- bycatch_diff %>%
+  filter(colony != "Other") %>% # this is misrepresented since the unassigned is also probably part of this.
+  ggplot(aes(x = fishery, y = perc_diff, fill = colony)) +
+  #geom_point(size = 3) +
+  geom_bar(stat = "identity", position = position_dodge2(preserve = "single"), width = 1) +
+  geom_hline(yintercept = 0, col = "black", linetype = "dotted") +
+   theme_bw() +
+  labs(
+    color = "Bycatch \ncolony of origin",
+    y = "Difference bycatch-population prop.",
+    x = " "
+  ) +
+  #scale_y_continuous(limits = c(0, 1), expand = c(0,0)) +
+  scale_fill_manual(values = c("#74c476", "dodgerblue", "#006d2c", "darkslateblue", "tomato", "skyblue")) +
+  theme(
+    axis.title.x = element_text(margin = margin(t=10)),
+      axis.title.y = element_text(margin = margin(r = 10))
+
+  ) +
+  scale_y_continuous(limits = c(-50, 100), labels = c("-50%", "0%", "50%", "100%"))
+  
+bycatchB
+
+ggsave("pdf_outputs/colony_bycatch_diff_plot.png", width = 6, height = 3.5)
+
+```
+
+```{r combine-bycatch-plots}
+bycatchA + bycatchB + plot_annotation(tag_levels = "A") + plot_layout(ncol = 1)
+
+ggsave("pdf_outputs/colony_bycatch_diff_plot_2panel.png", width = 7, height = 6.5)
+```
+
+
+
+# Spatial analysis
+
+## Spatial analysis with utilization distributions
+
+Copying over Jessie's code and modifying, then modifying more with Jon's input:
+
+```{r spatial-analysis-maps}
+#load packages (could probably remove some of these - calling in a bunch just in case)
+library(tidyverse)
+library(adehabitatHR)
+library(ggplot2)
+library(magrittr)
+library(sp)
+library(sf)
+library(raster)
+library(rgdal)
+library(mapdata)
+library(dplyr)
+
+# confirm sample numbers
+bfal <- colony_assignments %>%
+  filter(colony != "Unassigned" &
+           !is.na(SLatDD)) %>%
+  rename(long = SLongDD, lat = SLatDD)
+
+bfal$colony <- factor(bfal$colony, levels = c("FFS", "Kure", "Midway"), 
+                  labels = c("FFS (499)", "Kure (46)", "Midway (57)"))
+
+bfal$long360=ifelse(bfal$long < 0,bfal$long + 360, bfal$long)
+
+#colony locations
+colony_locs <- read_csv("../data/latlon_df.csv")
+
+```
+
+
+
+```{r spatial-analysis-maps-part2}
+#summarize to double check
+bfal %>% group_by(colony) %>% 
+  tally()
+
+# there are 619 birds at this stage, AK, HI, and WA combined
+# only includes birds with band data or GSI with PofZ >=.9, and must have spatial data
+
+# test plot
+plot(bfal$long360, bfal$lat, asp = 1)
+
+bfal %>%
+  dplyr::select(sampleID, lat, long, long360)
+
+points = st_as_sf(bfal, coords = c("long360", "lat"), crs = 4326)
+plot(st_geometry(points), pch=1, col="navy")
+
+# make kernels
+
+# Make a spatial points data.frame (SPDF)
+spdf <- SpatialPointsDataFrame(coords=cbind(bfal$long,
+  # bfal$long360,
+                                            bfal$lat),
+                               data=data.frame(id=bfal$colony),
+                               proj4string = CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs +wrap_lon=180"))
+
+# Project data into laea
+spdf.t <- spTransform(spdf,
+                      # CRS("+proj=aea +lat_1=55 +lat_2=65 +lat_0=50 +lon_0=-154")
+                      CRS("+proj=aea +lat_1=30 +lat_2=70 +lat_0=52 +lon_0=-170 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs") #https://spatialreference.org/ref/sr-org/north-pacific-albers-conic-equal-area/
+                      ) ## this projection might be wrong - check with Jon?
+
+# calculate kernelUD
+#jb try to up h factor and see what happens (more smoothing) ## get more details from Jon on the smoothing factor
+ud <- kernelUD(spdf.t, 
+               h = 100000,
+               # h="href",
+               # h=200000, #200km; 100km as used previously seemed a bit small, but if you want more detail and independent ud50 blobs maybe go back to 100km
+               grid=200, #
+               same4all=TRUE #the default for this is FALSE but I think you might want to calc the UDs for each ID (colony) over the same extent
+               )
+ud90 <- getverticeshr(ud, percent=90, standardize=T)
+ud50 <- getverticeshr(ud, percent=50, standardize=T)
+
+ud50sf<-st_as_sf(ud50) #I am just keeping these separate
+ud90sf<-st_as_sf(ud90)
+
+world <-st_crop(st_transform(st_as_sf(maps::map("world", plot = FALSE, fill = TRUE)), 
+                             st_crs(ud90sf)),
+                             1.15*st_bbox(ud90sf)) %>% #crop to just beyond extent of ud90
+  filter(ID!="Antarctica")
+
+p3 <-ggplot() + 
+  geom_sf(data=ud90sf, aes(fill=id), alpha=0.2) +
+  geom_sf(data=ud50sf, aes(fill=id), alpha=0.8) + 
+  geom_sf(data=world, fill="gray30",color=NA) +
+  facet_wrap(~id) +
+  labs(fill = "UD by \ncolony",
+       x = "",
+       y = "")+
+  theme_bw() +
+  scale_x_continuous(breaks = c(-175, -155, -135), labels = c("175˚W", "155˚W", "135˚W"), expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = c("#74c476", "dodgerblue", "slateblue")) +
+  theme(
+    axis.text.x = element_text(size = 7),
+    axis.text.y = element_text(size = 7)
+  ) 
+
+p3 
+
+
+ggsave(plot=p3,"pdf_outputs/BFAL_UDs_3panels_619birds.png", width = 8, height = 4)
+# bring that output into Inkscape for adding UD% notes
+```
