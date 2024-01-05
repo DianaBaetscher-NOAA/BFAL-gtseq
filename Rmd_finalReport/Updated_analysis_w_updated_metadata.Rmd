@@ -35,6 +35,12 @@ bycatch_metadata %>%
   group_by(`BandY/N`) %>%
   tally()
 
+# numbers for Table 2.
+bycatch_metadata %>%
+  filter(CollYear >2009) %>% 
+  group_by(FisheriesName, GenCollArea) %>%
+  tally() 
+
 # read in samplesheet dataframe
 all_samples_gtseq <- read_csv("csv_outputs/BFAL_gtseq_samplesheet_df.csv")
 
@@ -724,6 +730,39 @@ colony_assignments %>%
 
 
 
+HERE REMOVE ALL HAWAIIAN FISHERIES BANDED BIRDS. 
+All banded birds are collected in HI fisheries, which creates bias because banding is not consistent across breeding colonies.
+
+```{r remove-banded-hawaii-birds}
+hi_banded_to_remove <- colony_assignments %>%
+  filter(str_detect(FisheriesName, "Hawaii") & `BandY/N` == T)
+
+# account for those in Table 3
+hi_banded_to_remove %>%
+  group_by(Location) %>%
+  tally()
+
+assignments_no_hi_banded <- colony_assignments %>%
+  anti_join(., hi_banded_to_remove)
+
+# summarize for Table 3
+assignments_no_hi_banded %>%
+  group_by(GenCollArea, colony) %>%
+  tally() %>%
+  arrange(GenCollArea, colony)
+
+# all fisheries
+assignments_no_hi_banded %>%
+  group_by(colony) %>%
+  tally() %>%
+  filter(colony != "Unassigned") %>%
+  summarise(sum(n))
+
+  
+```
+Remove 124 banded birds that were caught in HI fisheries.
+
+
 
 ### Using that GSI/band location output for figures
 
@@ -741,13 +780,13 @@ prop_total_pop <- pop_est %>%
   filter(colony != "Total") %>%
   mutate(total_pop = sum(population_estimate)) %>%
   mutate(perc_of_total = population_estimate/total_pop) %>%
-  mutate(GenCollArea = "Total population") %>%
+  mutate(GenCollArea = "Breeding population") %>%
   mutate(colony = colony_abbr) # fix this once we figure out what's needed for Lehua
 
 ```
 Make barplot based on population proportions
 ```{r barplot-proportions}
-final_bycatch_prop <- colony_assignments %>%
+final_bycatch_prop <- assignments_no_hi_banded %>%
   group_by(colony, GenCollArea) %>%
   mutate(colony = ifelse(colony %in% c("Kauai, Kilauea", "Kauai, Lehua", "Oahu"), "Other", colony)) %>%
   tally() %>%
@@ -791,7 +830,7 @@ Remove WA (low sample sizes)
 Add all fisheries combined (including WA)
 
 ```{r barplot-with-proportions}
-area_order <- combined_prop_df$GenCollArea <- factor(combined_prop_df$GenCollArea, levels=c("Total population", "All fisheries", "Alaska fisheries", "Hawaii fisheries"))
+area_order <- combined_prop_df$GenCollArea <- factor(combined_prop_df$GenCollArea, levels=c("Breeding population", "All fisheries", "Alaska fisheries", "Hawaii fisheries"))
 
 bycatchA <- combined_prop_df %>%
   mutate(colony = ifelse(colony == "FFS", "French Frigate Shoals", colony)) %>%
@@ -825,7 +864,8 @@ bycatch_diff <- combined_prop_df %>%
   dplyr::select(colony, GenCollArea, col_bycatch_region_prop) %>%
   pivot_wider(names_from = "GenCollArea", values_from = col_bycatch_region_prop) %>%
   pivot_longer(cols = c(`All fisheries`, `Alaska fisheries`, `Hawaii fisheries`), names_to = "fishery", values_to = "prop_bycatch") %>%
-  mutate(perc_diff = (prop_bycatch-`Total population`)*100) %>%
+  mutate(prop_bycatch = ifelse(is.na(prop_bycatch), 0, prop_bycatch)) %>%
+  mutate(perc_diff = (prop_bycatch-`Breeding population`)*100) %>%
   filter(!is.na(perc_diff)) 
 # reorder the factor
 bycatch_diff$fishery <- factor(bycatch_diff$fishery, levels= c("All fisheries", "Alaska fisheries", "Hawaii fisheries"))
@@ -841,7 +881,7 @@ bycatchB <- bycatch_diff %>%
    theme_bw() +
   labs(
     color = "Bycatch \ncolony of origin",
-    y = "Difference bycatch-population prop.",
+    y = "Bycatch prop. - population prop.",
     x = " "
   ) +
   #scale_y_continuous(limits = c(0, 1), expand = c(0,0)) +
@@ -887,13 +927,13 @@ library(mapdata)
 library(dplyr)
 
 # confirm sample numbers
-bfal <- colony_assignments %>%
+bfal <- assignments_no_hi_banded %>%
   filter(colony != "Unassigned" &
            !is.na(SLatDD)) %>%
   rename(long = SLongDD, lat = SLatDD)
 
 bfal$colony <- factor(bfal$colony, levels = c("FFS", "Kure", "Midway"), 
-                  labels = c("FFS (499)", "Kure (46)", "Midway (57)"))
+                  labels = c("FFS (400)", "Kure (39)", "Midway (56)"))
 
 bfal$long360=ifelse(bfal$long < 0,bfal$long + 360, bfal$long)
 
@@ -977,6 +1017,6 @@ p3 <-ggplot() +
 p3 
 
 
-ggsave(plot=p3,"pdf_outputs/BFAL_UDs_3panels_619birds.png", width = 8, height = 4)
+ggsave(plot=p3,"pdf_outputs/BFAL_UDs_3panels_495birds.png", width = 8, height = 4)
 # bring that output into Inkscape for adding UD% notes
 ```
